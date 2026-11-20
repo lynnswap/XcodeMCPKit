@@ -7,16 +7,16 @@ import Testing
 @Suite(.serialized)
 struct ProcessTransportIntegrationTests {
     @Test func stdoutEOFFailsUnboundedRequestsAfterDeliveringTheFinalResponse() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
+        let fakeDriver = FakeMCPProcessDriver(terminatesOnTerminate: false)
         let scheduler = ControlledTerminationDelayScheduler()
-        let transport = try await UpstreamProcessXcodeMCPTransport.start(config: .init(
-            command: "/fake/upstream",
+        let transport = try await ProcessXcodeMCPTransport.start(config: .init(
+            command: "/fake/mcp-process",
             args: [],
             environment: [:],
             maxQueuedWriteBytes: 64 * 1024,
             terminationSignalGrace: .seconds(30),
             terminationDelayScheduler: scheduler,
-            driverFactory: StaticUpstreamProcessDriverFactory(fakeDriver)
+            driverFactory: StaticMCPProcessDriverFactory(fakeDriver)
         ))
         defer {
             fakeDriver.emitTermination(status: 0)
@@ -70,9 +70,9 @@ struct ProcessTransportIntegrationTests {
             switch await pendingRequest.result {
             case .success:
                 Issue.record("unanswered request succeeded after stdout EOF")
-                return nil as MCPBridgeRuntimeError?
+                return nil as MCPRuntimeError?
             case .failure(let error):
-                return error as? MCPBridgeRuntimeError
+                return error as? MCPRuntimeError
             }
         }
         guard case .transportUnavailable = error else {
@@ -85,7 +85,7 @@ struct ProcessTransportIntegrationTests {
             }
             Issue.record("request after EOF succeeded")
         } catch {
-            guard case .transportUnavailable = error as? MCPBridgeRuntimeError else {
+            guard case .transportUnavailable = error as? MCPRuntimeError else {
                 Issue.record("expected unavailable transport after EOF, got \(error)")
                 return
             }
@@ -108,15 +108,15 @@ struct ProcessTransportIntegrationTests {
     }
 
     @Test func processTransportDeinitSynchronouslySignalsOwnedProcess() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let config = UpstreamProcess.Config(
-            command: "/fake/upstream",
+        let fakeDriver = FakeMCPProcessDriver()
+        let config = MCPProcessLauncher.Config(
+            command: "/fake/mcp-process",
             args: [],
             environment: [:],
             maxQueuedWriteBytes: 1024,
-            driverFactory: StaticUpstreamProcessDriverFactory(fakeDriver)
+            driverFactory: StaticMCPProcessDriverFactory(fakeDriver)
         )
-        var transport: UpstreamProcessXcodeMCPTransport? = try await .start(config: config)
+        var transport: ProcessXcodeMCPTransport? = try await .start(config: config)
         weak let weakTransport = transport
 
         transport = nil

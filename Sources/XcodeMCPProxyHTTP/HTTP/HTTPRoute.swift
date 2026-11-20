@@ -13,7 +13,7 @@ enum HTTPRoute {
         switch (method, path) {
         case (.GET, "/health"):
             .health
-        case (.GET, "/debug/upstreams"):
+        case (.GET, "/debug/hosts"):
             .debugSnapshot
         case (.POST, "/debug/reset"):
             .debugReset

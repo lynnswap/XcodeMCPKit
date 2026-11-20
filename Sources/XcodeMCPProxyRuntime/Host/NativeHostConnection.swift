@@ -21,11 +21,11 @@ enum NativeHostConnectionError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .unavailable(let reason): "upstream unavailable: \(reason)"
-        case .overloaded: "upstream overloaded"
+        case .unavailable(let reason): "host unavailable: \(reason)"
+        case .overloaded: "host overloaded"
         case .expired: "This reference belongs to an earlier Xcode connection. Open or list workspaces again, or start a new session."
-        case .timedOut: "upstream timeout"
-        case .invalidResponse: "invalid upstream response"
+        case .timedOut: "host timeout"
+        case .invalidResponse: "invalid host response"
         case .rejected(let response): "Native request failed: \(String(decoding: response, as: UTF8.self))"
         }
     }
@@ -52,10 +52,10 @@ actor NativeHostConnection {
 
     private final class Process: Sendable {
         let generation: UInt64
-        let session: any UpstreamSession
+        let session: any MCPProcessSession
         let reader = NIOLockedValueBox<Task<Void, Never>?>(nil)
 
-        init(generation: UInt64, session: any UpstreamSession) {
+        init(generation: UInt64, session: any MCPProcessSession) {
             self.generation = generation
             self.session = session
         }
@@ -63,7 +63,7 @@ actor NativeHostConnection {
 
     private struct ProgressTokenMapping {
         let clientToken: JSONValue
-        let upstreamToken: String
+        let hostToken: String
     }
 
     private struct Pending {
@@ -81,18 +81,18 @@ actor NativeHostConnection {
         let task: Task<JSONValue, any Error>
     }
 
-    private let factory: any UpstreamSessionFactory
+    private let factory: any MCPProcessSessionFactory
     private let handshake: JSONValue
     private let handshakeTimeout: Duration?
     private let catalogTimeout: Duration?
     private let prewarmsCatalog: Bool
     private let clock: ClockClient
     private let logger: Logger
-    private let stderrLimiter = UpstreamStderrLogLimiter()
+    private let stderrLimiter = HostStderrLogLimiter()
     private let onEvent: @Sendable (Event) -> Void
     nonisolated let status = NIOLockedValueBox(Status())
     /// The process session that deinitialization cancels, and whether it already did.
-    private nonisolated let live = NIOLockedValueBox<(session: (any UpstreamSession)?, cancelled: Bool)>((nil, false))
+    private nonisolated let live = NIOLockedValueBox<(session: (any MCPProcessSession)?, cancelled: Bool)>((nil, false))
     /// A requested stop that has not finished; requests wait for it and then start a new process.
     private nonisolated let retirement = NIOLockedValueBox<Task<Void, Never>?>(nil)
 
@@ -109,7 +109,7 @@ actor NativeHostConnection {
     private var catalogEpoch: UInt64 = 0
     private var endings: [UInt64: Task<Void, Never>] = [:]
 
-    init(factory: any UpstreamSessionFactory, handshake: JSONValue, handshakeTimeout: Duration?,
+    init(factory: any MCPProcessSessionFactory, handshake: JSONValue, handshakeTimeout: Duration?,
          catalogTimeout: Duration?, prewarmsCatalog: Bool, clock: ClockClient, logger: Logger,
          onEvent: @escaping @Sendable (Event) -> Void) {
         self.factory = factory
@@ -230,7 +230,7 @@ actor NativeHostConnection {
 
     private func launch(generation: UInt64) async throws -> Process {
         defer { if starting?.generation == generation { starting = nil } }
-        let session: any UpstreamSession
+        let session: any MCPProcessSession
         do { session = try await factory.startSession() }
         catch {
             updateStatus { if $0.phase == .starting { $0.phase = .idle } }
@@ -329,9 +329,9 @@ actor NativeHostConnection {
         var progress: ProgressTokenMapping?
         if case .object(var parameters)? = object["params"], case .object(var meta)? = parameters["_meta"],
            let token = meta["progressToken"] {
-            let upstream = "progress-\(process.generation)-\(id)"
-            progress = ProgressTokenMapping(clientToken: token, upstreamToken: upstream)
-            meta["progressToken"] = .string(upstream)
+            let hostToken = "progress-\(process.generation)-\(id)"
+            progress = ProgressTokenMapping(clientToken: token, hostToken: hostToken)
+            meta["progressToken"] = .string(hostToken)
             parameters["_meta"] = .object(meta)
             object["params"] = .object(parameters)
         }
@@ -465,7 +465,7 @@ actor NativeHostConnection {
 
     // MARK: - Host messages
 
-    private func receive(_ event: Upstream.Event, from process: Process) async {
+    private func receive(_ event: MCPProcess.Event, from process: Process) async {
         guard self.process === process else { return }
         switch event {
         case .message(let data):
@@ -507,7 +507,7 @@ actor NativeHostConnection {
         case .notification("notifications/progress"):
             guard let parameters = object["params"] as? [String: Any],
                   let token = parameters["progressToken"] as? String,
-                  let entry = pending.values.first(where: { $0.progress?.upstreamToken == token }),
+                  let entry = pending.values.first(where: { $0.progress?.hostToken == token }),
                   let progress = entry.progress else { return }
             var rewritten = object
             var fields = parameters
@@ -535,7 +535,7 @@ actor NativeHostConnection {
     }
 
     private func log(stderr line: String) {
-        let level = UpstreamStderrLogFilter.level(for: line)
+        let level = HostStderrLogFilter.level(for: line)
         guard level >= logger.logLevel else { return }
         let decision = stderrLimiter.decision(upstreamIndex: 0, message: line, nowUptimeNs: clock.uptimeNanoseconds())
         guard decision.shouldLog else { return }

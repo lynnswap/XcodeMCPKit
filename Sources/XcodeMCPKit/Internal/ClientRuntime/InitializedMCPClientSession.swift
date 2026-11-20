@@ -324,7 +324,7 @@ package actor InitializedMCPClientSession {
         onProgress: ProgressHandler? = nil
     ) async throws -> JSONValue {
         guard method.isEmpty == false else {
-            throw MCPBridgeRuntimeError.invalidRequest("method must not be empty")
+            throw MCPRuntimeError.invalidRequest("method must not be empty")
         }
         try ensureOpen()
 
@@ -360,7 +360,7 @@ package actor InitializedMCPClientSession {
         let payload = try makeJSONRPCPayload(id: id, method: method, params: requestParams)
         let requestDeadline = deadline
         if requestDeadline?.hasExpired == true {
-            throw MCPBridgeRuntimeError.requestTimedOut(method: method)
+            throw MCPRuntimeError.requestTimedOut(method: method)
         }
         let operation = MCPClientOperation(
             envelope: try MCPClientEnvelope(data: payload),
@@ -404,7 +404,7 @@ package actor InitializedMCPClientSession {
                     var iterator = resultStream.makeAsyncIterator()
                     guard let result = try await iterator.next() else {
                         try Task.checkCancellation()
-                        throw MCPBridgeRuntimeError.closed
+                        throw MCPRuntimeError.closed
                     }
                     return result
                 } onCancel: {
@@ -474,10 +474,10 @@ package actor InitializedMCPClientSession {
                 return loaded
             }
             guard case .string(let nextCursor) = rawCursor else {
-                throw MCPBridgeRuntimeError.invalidResponse("\(method) returned an invalid cursor")
+                throw MCPRuntimeError.invalidResponse("\(method) returned an invalid cursor")
             }
             guard seenCursors.insert(nextCursor).inserted else {
-                throw MCPBridgeRuntimeError.invalidResponse("\(method) returned a cursor cycle")
+                throw MCPRuntimeError.invalidResponse("\(method) returned a cursor cycle")
             }
             cursor = nextCursor
         }
@@ -510,7 +510,7 @@ package actor InitializedMCPClientSession {
         let lanes = Array(progressLanes.values)
         progressHandlers.removeAll()
         progressLanes.removeAll()
-        pendingRequests.failAll(error: MCPBridgeRuntimeError.closed)
+        pendingRequests.failAll(error: MCPRuntimeError.closed)
         await pendingRequests.drainAllSendTasks()
         var deferredProgressTasks: [Task<Void, Never>] = []
         for lane in lanes {
@@ -545,7 +545,7 @@ package actor InitializedMCPClientSession {
     isolated deinit {
         eventTask?.cancel()
         for lane in progressLanes.values { lane.cancel() }
-        pendingRequests.failAll(error: MCPBridgeRuntimeError.closed)
+        pendingRequests.failAll(error: MCPRuntimeError.closed)
         closeCompletionTask?.cancel()
         for task in deferredProgressTasks { task.cancel() }
         for waiter in closeWaiters { waiter.resume() }
@@ -554,20 +554,20 @@ package actor InitializedMCPClientSession {
 
 private extension InitializedMCPClientSession {
     static func runtimeError(from error: any Error) -> any Error {
-        if let error = error as? MCPBridgeRuntimeError { return error }
+        if let error = error as? MCPRuntimeError { return error }
         if let error = error as? MCPClientSessionFailure { return error }
         if let failure = error as? MCPTransportFailure {
             switch failure {
             case .sessionExpired(let sessionID, _):
-                return MCPBridgeRuntimeError.transportUnavailable(
+                return MCPRuntimeError.transportUnavailable(
                     "Streamable HTTP session expired: \(sessionID)"
                 )
             case .deliveryUnknown(let reason), .unavailable(let reason):
-                return MCPBridgeRuntimeError.transportUnavailable(reason)
+                return MCPRuntimeError.transportUnavailable(reason)
             }
         }
         if error is CancellationError { return error }
-        return MCPBridgeRuntimeError.transportUnavailable(errorDescription(error))
+        return MCPRuntimeError.transportUnavailable(errorDescription(error))
     }
 
     static func errorDescription(_ error: any Error) -> String {
@@ -579,7 +579,7 @@ private extension InitializedMCPClientSession {
 
     static func requiresCancellationNotification(_ error: any Error) -> Bool {
         if error is CancellationError { return true }
-        guard let runtimeError = error as? MCPBridgeRuntimeError else { return false }
+        guard let runtimeError = error as? MCPRuntimeError else { return false }
         if case .requestTimedOut = runtimeError { return true }
         return false
     }
@@ -591,7 +591,7 @@ private extension InitializedMCPClientSession {
     ) async throws -> T {
         guard let deadline else { return try await operation() }
         guard deadline.hasExpired == false else {
-            throw MCPBridgeRuntimeError.requestTimedOut(method: method)
+            throw MCPRuntimeError.requestTimedOut(method: method)
         }
         let clock = configuration.clock
         return try await withThrowingTaskGroup(of: T.self) { group in
@@ -599,7 +599,7 @@ private extension InitializedMCPClientSession {
             group.addTask {
                 await clock.sleep(deadline.remainingDuration())
                 try Task.checkCancellation()
-                throw MCPBridgeRuntimeError.requestTimedOut(method: method)
+                throw MCPRuntimeError.requestTimedOut(method: method)
             }
             let result = try await group.next()!
             group.cancelAll()
@@ -608,7 +608,7 @@ private extension InitializedMCPClientSession {
     }
 
     func ensureOpen() throws {
-        if isClosed { throw MCPBridgeRuntimeError.closed }
+        if isClosed { throw MCPRuntimeError.closed }
     }
 
     func handle(_ event: MCPClientSessionEvent) async {
@@ -617,7 +617,7 @@ private extension InitializedMCPClientSession {
             await handleMessage(envelope)
         case .connectionState(let snapshot):
             if case .closed = snapshot.phase {
-                pendingRequests.failAll(error: MCPBridgeRuntimeError.closed)
+                pendingRequests.failAll(error: MCPRuntimeError.closed)
             } else if case .unavailable(let error) = snapshot.phase {
                 pendingRequests.failAll(error: error.sessionError)
             }
@@ -686,7 +686,7 @@ private extension InitializedMCPClientSession {
             return .object(["_meta": .object(["progressToken": .string(token)])])
         }
         guard case .object(var object) = params else {
-            throw MCPBridgeRuntimeError.invalidRequest("progress requests require object params")
+            throw MCPRuntimeError.invalidRequest("progress requests require object params")
         }
         var meta: [String: JSONValue]
         if case .object(let existingMeta) = object["_meta"] { meta = existingMeta } else { meta = [:] }
@@ -698,7 +698,7 @@ private extension InitializedMCPClientSession {
     func parseJSONObject(_ data: Data) throws -> [String: JSONValue] {
         let raw = try JSONRPC.Wire.object(fromData: data)
         guard let value = JSONValue(any: raw), case .object(let object) = value else {
-            throw MCPBridgeRuntimeError.invalidResponse("JSON-RPC message is not an object")
+            throw MCPRuntimeError.invalidResponse("JSON-RPC message is not an object")
         }
         return object
     }
@@ -710,7 +710,7 @@ private extension InitializedMCPClientSession {
         }
     }
 
-    func parseServerError(_ value: JSONValue) -> MCPBridgeRuntimeError {
+    func parseServerError(_ value: JSONValue) -> MCPRuntimeError {
         guard case .object(let object) = value else {
             return .invalidResponse("JSON-RPC error is not an object")
         }

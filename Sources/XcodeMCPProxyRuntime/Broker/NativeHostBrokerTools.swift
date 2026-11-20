@@ -13,8 +13,8 @@ enum NativeBrokerReply: Sendable {
     case accepted
 
     /// The error for a host response that is not valid JSON-RPC for its request.
-    static func invalidUpstreamResponse(id: JSONRPC.ID? = nil) -> Self {
-        .error(id: id, code: -32603, message: "invalid upstream response")
+    static func invalidHostResponse(id: JSONRPC.ID? = nil) -> Self {
+        .error(id: id, code: -32603, message: "invalid host response")
     }
 
     /// The message HTTP sends to the client.

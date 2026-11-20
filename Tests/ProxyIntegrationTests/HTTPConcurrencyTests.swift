@@ -172,13 +172,13 @@ struct HTTPConcurrencyTests {
             let calls = host.requests("tools/call")
             let reportingCall = try #require(calls.first)
             guard case .object(let params)? = reportingCall["params"], case .object(let meta)? = params["_meta"],
-                  let upstreamToken = meta["progressToken"] else {
+                  let hostToken = meta["progressToken"] else {
                 Issue.record("the host request has no progress token")
                 return
             }
 
             host.emit(.object(["jsonrpc": .string("2.0"), "method": .string("notifications/progress"),
-                               "params": .object(["progressToken": upstreamToken, "progress": .number(.int(1)),
+                               "params": .object(["progressToken": hostToken, "progress": .number(.int(1)),
                                                   "message": .string("halfway")])]))
             let result = JSONValue.object(["content": .array([])])
             for call in calls {
@@ -428,7 +428,7 @@ struct HTTPConcurrencyTests {
             let (firstResponse, firstObject) = try await first
             #expect(firstResponse.statusCode == 200)
             #expect((firstObject["id"] as? NSNumber)?.intValue == 700)
-            #expect((firstObject["error"] as? [String: Any])?["message"] as? String == "upstream timeout")
+            #expect((firstObject["error"] as? [String: Any])?["message"] as? String == "host timeout")
 
             let host = try #require(runtime.host)
             let hostRequestIDs = host.requests("tools/call").compactMap { $0["id"] }

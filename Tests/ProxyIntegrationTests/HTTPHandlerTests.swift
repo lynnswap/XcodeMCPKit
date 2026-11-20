@@ -29,14 +29,14 @@ struct HTTPHandlerTests {
         #expect(response.body == "ok")
     }
 
-    @Test func httpDebugUpstreamsReturnsSnapshot() async throws {
+    @Test func httpDebugHostsReturnsSnapshot() async throws {
         var config = makeHTTPConfig()
         config.enablesDebugEndpoints = true
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
         try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/debug/upstreams")
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/debug/hosts")
         try await channel.writeInbound(HTTPServerRequestPart.head(head))
         try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
@@ -55,7 +55,7 @@ struct HTTPHandlerTests {
         #expect((hosts.first?["inFlightRequests"] as? NSNumber)?.intValue == 0)
     }
 
-    @Test func httpDebugUpstreamsReturnsNotFoundWhenListenerIsNotLoopback() async throws {
+    @Test func httpDebugHostsReturnsNotFoundWhenListenerIsNotLoopback() async throws {
         var config = makeHTTPConfig()
         config.listenHost = "0.0.0.0"
         config.enablesDebugEndpoints = true
@@ -64,7 +64,7 @@ struct HTTPHandlerTests {
         let runtime = try HTTPTestRuntime(config: config)
         try await addHTTPHandler(to: channel, config: config, runtime: runtime)
 
-        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/debug/upstreams")
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/debug/hosts")
         try await channel.writeInbound(HTTPServerRequestPart.head(head))
         try await channel.writeInbound(HTTPServerRequestPart.end(nil))
 
@@ -136,7 +136,7 @@ struct HTTPHandlerTests {
         #expect(response.body == "not found")
     }
 
-    @Test(arguments: [(HTTPMethod.GET, "/debug/upstreams?includeSensitive=1"), (.POST, "/debug/reset")])
+    @Test(arguments: [(HTTPMethod.GET, "/debug/hosts?includeSensitive=1"), (.POST, "/debug/reset")])
     func httpDebugEndpointsRequireTheOptIn(method: HTTPMethod, uri: String) async throws {
         let config = makeHTTPConfig()
         let channel = makeHTTPTestChannel()
@@ -1110,7 +1110,7 @@ struct HTTPHandlerTests {
         )
         let error = try #require(errorObject["error"] as? [String: Any])
         #expect((error["code"] as? NSNumber)?.intValue == -32001)
-        #expect(error["message"] as? String == "upstream unavailable")
+        #expect(error["message"] as? String == "host unavailable")
         #expect(
             runtime.controlService.sessions.phase(of: ProxySessionID(rawValue: sessionID))
                 == .initialized(protocolVersion: MCP.ProtocolVersion.current)
@@ -1301,7 +1301,7 @@ struct HTTPHandlerTests {
         }
     }
 
-    @Test func httpJSONArrayBodyIsRejectedBeforeUpstreamRouting() async throws {
+    @Test func httpJSONArrayBodyIsRejectedBeforeHostRouting() async throws {
         let config = makeHTTPConfig()
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
@@ -1342,7 +1342,7 @@ struct HTTPHandlerTests {
         #expect((object?["id"] as? NSNumber)?.intValue == 2001)
         let error = object?["error"] as? [String: Any]
         #expect((error?["code"] as? NSNumber)?.intValue == -32000)
-        #expect((error?["message"] as? String) == "upstream timeout")
+        #expect((error?["message"] as? String) == "host timeout")
 
         let heldID = try #require(host.requests("tools/call").first?["id"])
         let cancellations = try await runtime.waitForHostMessages("notifications/cancelled")
@@ -1353,7 +1353,7 @@ struct HTTPHandlerTests {
         #expect(params["requestId"] == heldID)
     }
 
-    @Test func httpMalformedJSONReturnsParseErrorBeforeUpstreamUnavailable() async throws {
+    @Test func httpMalformedJSONReturnsParseErrorBeforeHostUnavailable() async throws {
         let config = makeHTTPConfig()
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config)
@@ -1387,7 +1387,7 @@ struct HTTPHandlerTests {
         let channel = makeHTTPTestChannel()
         let runtime = try HTTPTestRuntime(config: config) { method, _ in
             #expect(method == "tools/call")
-            return .error(code: -32002, message: "upstream overloaded")
+            return .error(code: -32002, message: "host overloaded")
         }
         try await addHTTPHandler(to: channel, config: config, runtime: runtime)
         let sessionID = try await initializeHTTPChannel(channel)
@@ -1406,7 +1406,7 @@ struct HTTPHandlerTests {
         #expect((object?["id"] as? NSNumber)?.intValue == 3101)
         let error = object?["error"] as? [String: Any]
         #expect((error?["code"] as? NSNumber)?.intValue == -32002)
-        #expect((error?["message"] as? String) == "upstream overloaded")
+        #expect((error?["message"] as? String) == "host overloaded")
     }
 
     @Test func httpInitializeIgnoresCallerProvidedSessionHeader() async throws {
@@ -1878,7 +1878,7 @@ struct HTTPHandlerTests {
             case .health:
                 return "/health"
             case .debugSnapshot:
-                return "/debug/upstreams?includeSensitive=1"
+                return "/debug/hosts?includeSensitive=1"
             case .debugReset:
                 return "/debug/reset"
             case .sse, .deleteSession, .post:
@@ -2000,11 +2000,11 @@ enum HostFailureCase: CaseIterable, Sendable {
 
     var message: String {
         switch self {
-        case .timeout: "upstream timeout"
-        case .processExit: "upstream unavailable"
-        case .backpressure: "upstream overloaded"
+        case .timeout: "host timeout"
+        case .processExit: "host unavailable"
+        case .backpressure: "host overloaded"
         case .rpcError: "Invalid params"
-        case .invalidResponse: "invalid upstream response"
+        case .invalidResponse: "invalid host response"
         }
     }
 }

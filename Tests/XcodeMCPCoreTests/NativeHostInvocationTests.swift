@@ -41,7 +41,7 @@ struct NativeHostInvocationTests {
     @Test func explicitMissingBundleDoesNotSelectAnotherInstalledHelper() {
         var fileSystem = FileSystemClient.testValue
         fileSystem.isExecutableFile = { $0 == "/installed/XcodeMCPNativeHost.app/Contents/MacOS/xcode-mcp-native-host" }
-        #expect(throws: MCPBridgeRuntimeError.self) {
+        #expect(throws: MCPRuntimeError.self) {
             try NativeHostInvocation.resolve(bundleURL: URL(fileURLWithPath: "/missing.app"),
                 environment: ["PATH": "/installed"], executableURL: nil, fileSystem: fileSystem)
         }

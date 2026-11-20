@@ -2,7 +2,7 @@ package struct ProxyHTTPConfiguration: Sendable {
     package let listenHost: String
     package let listenPort: Int
     package let maxBodyBytes: Int
-    /// Serves `/debug/upstreams` and `/debug/reset` on a loopback listener.
+    /// Serves `/debug/hosts` and `/debug/reset` on a loopback listener.
     package let enablesDebugEndpoints: Bool
 
     package init(listenHost: String, listenPort: Int, maxBodyBytes: Int, enablesDebugEndpoints: Bool = false) {

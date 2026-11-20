@@ -4,11 +4,11 @@ import Testing
 @testable import XcodeMCPCoreTestSupport
 
 @Suite
-struct UpstreamProcessTests {
+struct MCPProcessLauncherTests {
     @Test func upstreamSessionReassemblesStdoutMessagesAndPreservesOrder() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(fakeDriver)
-        let events = UpstreamEventRecorder(session.events)
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(fakeDriver)
+        let events = MCPProcessEventRecorder(session.events)
         defer {
             events.cancel()
             Task {
@@ -49,9 +49,9 @@ struct UpstreamProcessTests {
     }
 
     @Test func upstreamSessionFlushesStderrLinesAndLargeChunksDeterministically() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(fakeDriver)
-        let events = UpstreamEventRecorder(session.events)
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(fakeDriver)
+        let events = MCPProcessEventRecorder(session.events)
         defer {
             events.cancel()
             Task {
@@ -80,8 +80,8 @@ struct UpstreamProcessTests {
     }
 
     @Test func upstreamSessionWritesStdinInOrderAndReportsBackpressure() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(fakeDriver, maxQueuedWriteBytes: 12)
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(fakeDriver, maxQueuedWriteBytes: 12)
         defer {
             Task {
                 await session.stop()
@@ -99,9 +99,9 @@ struct UpstreamProcessTests {
     }
 
     @Test func upstreamSessionDrainsLateStdoutBeforeExitAfterTermination() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(fakeDriver)
-        let events = UpstreamEventRecorder(session.events)
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(fakeDriver)
+        let events = MCPProcessEventRecorder(session.events)
         defer {
             events.cancel()
             Task {
@@ -135,13 +135,13 @@ struct UpstreamProcessTests {
 
     @Test func upstreamSessionForcesExitAfterDeterministicDrainGrace() async throws {
         let drainClock = TestClock()
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(
             fakeDriver,
             terminationDrainGrace: .seconds(10),
             clock: makeTestClockClient(drainClock)
         )
-        let events = UpstreamEventRecorder(session.events)
+        let events = MCPProcessEventRecorder(session.events)
         defer {
             events.cancel()
             Task {
@@ -165,9 +165,9 @@ struct UpstreamProcessTests {
     }
 
     @Test func upstreamSessionTreatsInvalidStdoutAsFatalProtocolViolation() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(fakeDriver)
-        let events = UpstreamEventRecorder(session.events)
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(fakeDriver)
+        let events = MCPProcessEventRecorder(session.events)
         defer {
             events.cancel()
             Task {
@@ -194,12 +194,12 @@ struct UpstreamProcessTests {
 
     @Test func stdoutEOFStartsBoundedCleanupAndRejectsFurtherSends() async throws {
         let scheduler = ControlledTerminationDelayScheduler()
-        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
-        let session = try await makeFakeUpstreamSession(
+        let fakeDriver = FakeMCPProcessDriver(terminatesOnTerminate: false)
+        let session = try await makeFakeProcessSession(
             fakeDriver, terminationSignalGrace: .seconds(30),
             terminationDelayScheduler: scheduler
         )
-        let events = UpstreamEventRecorder(session.events)
+        let events = MCPProcessEventRecorder(session.events)
         defer {
             events.cancel()
             fakeDriver.emitTermination(status: 0)
@@ -226,9 +226,9 @@ struct UpstreamProcessTests {
     }
 
     @Test func upstreamSessionStopIsIdempotentAndSuppressesExit() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(fakeDriver)
-        let events = UpstreamEventRecorder(session.events)
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(fakeDriver)
+        let events = MCPProcessEventRecorder(session.events)
         defer {
             events.cancel()
         }
@@ -247,13 +247,13 @@ struct UpstreamProcessTests {
     @Test func stdoutEOFDrainsStderrBeforeTerminationNotification() async throws {
         let scheduler = ControlledTerminationDelayScheduler()
         let drainClock = TestClock()
-        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
-        let session = try await makeFakeUpstreamSession(
+        let fakeDriver = FakeMCPProcessDriver(terminatesOnTerminate: false)
+        let session = try await makeFakeProcessSession(
             fakeDriver,
             terminationDelayScheduler: scheduler,
             clock: makeTestClockClient(drainClock)
         )
-        let events = UpstreamEventRecorder(session.events)
+        let events = MCPProcessEventRecorder(session.events)
         defer {
             events.cancel()
             Task { await session.stop() }
@@ -288,8 +288,8 @@ struct UpstreamProcessTests {
     }
 
     @Test func concurrentStopsShareOutputDrainCompletion() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver(finishesOutputOnStop: false)
-        let session = try await makeFakeUpstreamSession(fakeDriver)
+        let fakeDriver = FakeMCPProcessDriver(finishesOutputOnStop: false)
+        let session = try await makeFakeProcessSession(fakeDriver)
         let completedStops = RecordedValues<Int>()
 
         let first = Task {
@@ -314,8 +314,8 @@ struct UpstreamProcessTests {
 
     @Test func stopCancelsEscalationDelayAfterDelayedTerminationAcknowledgement() async throws {
         let scheduler = ControlledTerminationDelayScheduler()
-        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
-        let session = try await makeFakeUpstreamSession(
+        let fakeDriver = FakeMCPProcessDriver(terminatesOnTerminate: false)
+        let session = try await makeFakeProcessSession(
             fakeDriver,
             terminationSignalGrace: .seconds(30),
             terminationDelayScheduler: scheduler
@@ -348,8 +348,8 @@ struct UpstreamProcessTests {
 
     @Test func stopEscalatesIgnoredTerminationAndDrainsQueuedStdinCallbacks() async throws {
         let scheduler = ControlledTerminationDelayScheduler()
-        let fakeDriver = FakeUpstreamProcessDriver(terminatesOnTerminate: false)
-        let session = try await makeFakeUpstreamSession(
+        let fakeDriver = FakeMCPProcessDriver(terminatesOnTerminate: false)
+        let session = try await makeFakeProcessSession(
             fakeDriver,
             terminationSignalGrace: .seconds(30),
             terminationDelayScheduler: scheduler
@@ -389,9 +389,9 @@ struct UpstreamProcessTests {
 
     @Test func normalStopPreservesFinalOutputWithoutSendingTerminationSignals() async throws {
         let scheduler = ControlledTerminationDelayScheduler()
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(fakeDriver, terminationDelayScheduler: scheduler)
-        let events = UpstreamEventRecorder(session.events)
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(fakeDriver, terminationDelayScheduler: scheduler)
+        let events = MCPProcessEventRecorder(session.events)
         let stopped = RecordedValues<Void>()
         let stop = Task {
             await session.stop()
@@ -428,8 +428,8 @@ struct UpstreamProcessTests {
 
     @Test func normalStopBoundsOutputDrainAfterNaturalExit() async throws {
         let clock = TestClock()
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(
             fakeDriver, terminationDrainGrace: .seconds(10), clock: makeTestClockClient(clock)
         )
         let stop = Task { await session.stop() }
@@ -445,8 +445,8 @@ struct UpstreamProcessTests {
     }
 
     @Test func synchronousCancelKeepsImmediateSignalCleanup() async throws {
-        let fakeDriver = FakeUpstreamProcessDriver()
-        let session = try await makeFakeUpstreamSession(fakeDriver)
+        let fakeDriver = FakeMCPProcessDriver()
+        let session = try await makeFakeProcessSession(fakeDriver)
         session.cancel()
         #expect(fakeDriver.snapshot().terminateCount == 1)
         #expect(fakeDriver.snapshot().stopOutputCount == 1)
@@ -459,7 +459,7 @@ struct UpstreamProcessTests {
 }
 
 @Suite(.serialized, .enabled(if: ProcessTestEnvironment.isEnabled))
-struct LiveUpstreamProcessSmokeTests {
+struct LiveMCPProcessSmokeTests {
     @Test(arguments: [true, false])
     func stopLetsEOFChildCompleteOrEscalatesAnUnresponsiveChild(respondsToEOF: Bool) async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -486,7 +486,7 @@ struct LiveUpstreamProcessSmokeTests {
             fi
             while :; do :; done
             """
-        let config = UpstreamProcess.Config(
+        let config = MCPProcessLauncher.Config(
             command: "/bin/sh",
             args: ["-c", script, "eof-child", respondsToEOF ? "natural" : "unresponsive", marker.path, pidFile.path],
             environment: ProcessInfo.processInfo.environment,
@@ -494,8 +494,8 @@ struct LiveUpstreamProcessSmokeTests {
             terminationSignalGrace: respondsToEOF ? .seconds(1) : .milliseconds(75),
             driverFactory: TerminationRecordingDriverFactory(statuses: statuses)
         )
-        try await withLiveUpstreamSession(config: config) { session in
-            let events = UpstreamEventRecorder(session.events)
+        try await withLiveProcessSession(config: config) { session in
+            let events = MCPProcessEventRecorder(session.events)
             _ = try await events.nextMessage()
             try await waitWithTimeout("EOF child stop", timeout: .seconds(5)) {
                 await session.stop()
@@ -516,16 +516,16 @@ struct LiveUpstreamProcessSmokeTests {
     }
 
     @Test func upstreamProcessLiveSmokeStopsChildAfterStdoutEOF() async throws {
-        let config = UpstreamProcess.Config(
+        let config = MCPProcessLauncher.Config(
             command: "/bin/sh",
             args: ["-c", "trap '' TERM; printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'; exec 1>&-; while :; do sleep 1; done"],
             environment: ProcessInfo.processInfo.environment,
             maxQueuedWriteBytes: 1024,
             terminationSignalGrace: .milliseconds(50)
         )
-        try await withLiveUpstreamSession(config: config) { session in
+        try await withLiveProcessSession(config: config) { session in
             let events = try await waitWithTimeout("live stdout EOF cleanup", timeout: .seconds(5)) {
-                var observed: [Upstream.Event] = []
+                var observed: [MCPProcess.Event] = []
                 for await event in session.events { observed.append(event) }
                 return observed
             }
@@ -543,7 +543,7 @@ struct LiveUpstreamProcessSmokeTests {
     }
 
     @Test func upstreamProcessLiveSmokeDrainsMessageStderrAndExit() async throws {
-        let config = UpstreamProcess.Config(
+        let config = MCPProcessLauncher.Config(
             command: "/bin/sh",
             args: [
                 "-c",
@@ -553,12 +553,12 @@ struct LiveUpstreamProcessSmokeTests {
             maxQueuedWriteBytes: 1024
         )
 
-        try await withLiveUpstreamSession(config: config) { session in
+        try await withLiveProcessSession(config: config) { session in
             let events = try await waitWithTimeout(
-                "live UpstreamProcess smoke should finish",
+                "live MCPProcessLauncher smoke should finish",
                 timeout: .seconds(5)
             ) {
-                var observed: [Upstream.Event] = []
+                var observed: [MCPProcess.Event] = []
                 for await event in session.events {
                     observed.append(event)
                     if isExitEvent(event) {
@@ -590,25 +590,25 @@ struct LiveUpstreamProcessSmokeTests {
     }
 }
 
-private struct TerminationRecordingDriverFactory: UpstreamProcessDriverMaking {
+private struct TerminationRecordingDriverFactory: MCPProcessDriverMaking {
     let statuses: DeterministicRecorder<Int32>
 
-    func makeDriver() -> any UpstreamProcessDriving {
-        TerminationRecordingDriver(driver: LiveUpstreamProcessDriverFactory().makeDriver(), statuses: statuses)
+    func makeDriver() -> any MCPProcessDriving {
+        TerminationRecordingDriver(driver: LiveMCPProcessDriverFactory().makeDriver(), statuses: statuses)
     }
 }
 
-private final class TerminationRecordingDriver: UpstreamProcessDriving {
-    let driver: any UpstreamProcessDriving
+private final class TerminationRecordingDriver: MCPProcessDriving {
+    let driver: any MCPProcessDriving
     let statuses: DeterministicRecorder<Int32>
 
-    init(driver: any UpstreamProcessDriving, statuses: DeterministicRecorder<Int32>) {
+    init(driver: any MCPProcessDriving, statuses: DeterministicRecorder<Int32>) {
         self.driver = driver
         self.statuses = statuses
     }
 
     func start(command: String, args: [String], environment: [String: String], maxQueuedWriteBytes: Int,
-               onTermination: @escaping @Sendable (Int32) -> Void) throws -> UpstreamProcessStartedIO {
+               onTermination: @escaping @Sendable (Int32) -> Void) throws -> MCPProcessStartedIO {
         let statuses = statuses
         return try driver.start(command: command, args: args, environment: environment,
                                 maxQueuedWriteBytes: maxQueuedWriteBytes) { status in
@@ -617,7 +617,7 @@ private final class TerminationRecordingDriver: UpstreamProcessDriving {
         }
     }
 
-    func sendStdin(_ payload: Data) -> Upstream.SendResult { driver.sendStdin(payload) }
+    func sendStdin(_ payload: Data) -> MCPProcess.SendResult { driver.sendStdin(payload) }
     func closeStdin() { driver.closeStdin() }
     func terminate() -> Bool { driver.terminate() }
     func forceTerminate() -> Bool { driver.forceTerminate() }
@@ -626,17 +626,17 @@ private final class TerminationRecordingDriver: UpstreamProcessDriving {
     func waitForOutputStopped() async { await driver.waitForOutputStopped() }
 }
 
-private func makeFakeUpstreamSession(
-    _ fakeDriver: FakeUpstreamProcessDriver,
+private func makeFakeProcessSession(
+    _ fakeDriver: FakeMCPProcessDriver,
     maxQueuedWriteBytes: Int = 1024,
     terminationDrainGrace: Duration = .milliseconds(250),
     terminationSignalGrace: Duration = .seconds(1),
-    terminationDelayScheduler: any UpstreamTerminationDelayScheduling =
-        LiveUpstreamTerminationDelayScheduler(),
+    terminationDelayScheduler: any MCPProcessTerminationDelayScheduling =
+        LiveMCPProcessTerminationDelayScheduler(),
     clock: ClockClient = .liveValue
-) async throws -> any UpstreamSession {
-    let config = UpstreamProcess.Config(
-        command: "/fake/upstream",
+) async throws -> any MCPProcessSession {
+    let config = MCPProcessLauncher.Config(
+        command: "/fake/mcp-process",
         args: [],
         environment: [:],
         maxQueuedWriteBytes: maxQueuedWriteBytes,
@@ -644,16 +644,16 @@ private func makeFakeUpstreamSession(
         terminationSignalGrace: terminationSignalGrace,
         terminationDelayScheduler: terminationDelayScheduler,
         clock: clock,
-        driverFactory: StaticUpstreamProcessDriverFactory(fakeDriver)
+        driverFactory: StaticMCPProcessDriverFactory(fakeDriver)
     )
-    return try await UpstreamProcess(configuration: config).startSession()
+    return try await MCPProcessLauncher(configuration: config).startSession()
 }
 
-private func withLiveUpstreamSession<T: Sendable>(
-    config: UpstreamProcess.Config,
-    _ body: @escaping @Sendable (any UpstreamSession) async throws -> T
+private func withLiveProcessSession<T: Sendable>(
+    config: MCPProcessLauncher.Config,
+    _ body: @escaping @Sendable (any MCPProcessSession) async throws -> T
 ) async throws -> T {
-    let session = try await UpstreamProcess(configuration: config).startSession()
+    let session = try await MCPProcessLauncher(configuration: config).startSession()
     do {
         let result = try await body(session)
         await session.stop()
@@ -664,14 +664,14 @@ private func withLiveUpstreamSession<T: Sendable>(
     }
 }
 
-private final class UpstreamEventRecorder: @unchecked Sendable {
-    private let recorder = DeterministicRecorder<Upstream.Event>()
-    private let task: Task<[Upstream.Event], Never>
+private final class MCPProcessEventRecorder: @unchecked Sendable {
+    private let recorder = DeterministicRecorder<MCPProcess.Event>()
+    private let task: Task<[MCPProcess.Event], Never>
 
-    init(_ events: AsyncStream<Upstream.Event>) {
+    init(_ events: AsyncStream<MCPProcess.Event>) {
         let recorder = recorder
         self.task = Task {
-            var allEvents: [Upstream.Event] = []
+            var allEvents: [MCPProcess.Event] = []
             for await event in events {
                 allEvents.append(event)
                 recorder.record(event)
@@ -681,8 +681,8 @@ private final class UpstreamEventRecorder: @unchecked Sendable {
     }
 
     func nextEvent(
-        matching predicate: @escaping @Sendable (Upstream.Event) -> Bool
-    ) async throws -> Upstream.Event {
+        matching predicate: @escaping @Sendable (MCPProcess.Event) -> Bool
+    ) async throws -> MCPProcess.Event {
         try await recorder.nextValue(matching: predicate)
     }
 
@@ -712,11 +712,11 @@ private final class UpstreamEventRecorder: @unchecked Sendable {
         return value
     }
 
-    func snapshot() -> [Upstream.Event] {
+    func snapshot() -> [MCPProcess.Event] {
         recorder.snapshot()
     }
 
-    func finishedEvents() async -> [Upstream.Event] {
+    func finishedEvents() async -> [MCPProcess.Event] {
         await task.value
     }
 
@@ -725,7 +725,7 @@ private final class UpstreamEventRecorder: @unchecked Sendable {
     }
 }
 
-private func isExitEvent(_ event: Upstream.Event) -> Bool {
+private func isExitEvent(_ event: MCPProcess.Event) -> Bool {
     if case .exit = event {
         return true
     }

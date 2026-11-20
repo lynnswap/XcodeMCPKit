@@ -26,10 +26,10 @@ package struct MCPClientEnvelope: Sendable {
         do {
             raw = try JSONSerialization.jsonObject(with: data)
         } catch {
-            throw MCPBridgeRuntimeError.invalidRequest("invalid JSON-RPC message: \(error.localizedDescription)")
+            throw MCPRuntimeError.invalidRequest("invalid JSON-RPC message: \(error.localizedDescription)")
         }
         guard let object = raw as? [String: Any] else {
-            throw MCPBridgeRuntimeError.invalidRequest("JSON-RPC message must be one object")
+            throw MCPRuntimeError.invalidRequest("JSON-RPC message must be one object")
         }
         let method = object["method"] as? String
         let id = object["id"].flatMap(JSONRPC.ID.init(any:))
@@ -40,7 +40,7 @@ package struct MCPClientEnvelope: Sendable {
         } else if let id {
             kind = .response(id: id)
         } else {
-            throw MCPBridgeRuntimeError.invalidRequest("JSON-RPC message has neither method nor id")
+            throw MCPRuntimeError.invalidRequest("JSON-RPC message has neither method nor id")
         }
         self.data = data
     }
@@ -232,7 +232,7 @@ private final class MCPConnectionCommandIngress: Sendable {
 
     func admit() throws -> (id: UUID, admission: MCPConnectionOperationAdmission) {
         try state.withLock { state in
-            guard state.isAccepting else { throw MCPBridgeRuntimeError.closed }
+            guard state.isAccepting else { throw MCPRuntimeError.closed }
             let id = UUID()
             let admission = MCPConnectionOperationAdmission()
             state.operations[id] = admission
@@ -460,7 +460,7 @@ package actor MCPClientSessionAuthority {
                 throw failure
             }
             try await joinRecovery(failedConnection: connection.id, deadline: operation.deadline)
-            guard let replacement = current else { throw MCPBridgeRuntimeError.closed }
+            guard let replacement = current else { throw MCPRuntimeError.closed }
             do {
                 try await sendOnce(operation.envelope, on: replacement, deadline: operation.deadline)
             } catch let secondFailure as MCPTransportFailure {
@@ -475,7 +475,7 @@ package actor MCPClientSessionAuthority {
     }
 
     package func reconnect(deadline: Deadline?) async throws {
-        if isClosed { throw MCPBridgeRuntimeError.closed }
+        if isClosed { throw MCPRuntimeError.closed }
         try await joinRecovery(failedConnection: current?.id, deadline: deadline, force: true)
     }
 
@@ -526,7 +526,7 @@ package actor MCPClientSessionAuthority {
         interruptedRecovery?.attempt.cancel()
         interruptedRecovery?.deadline.cancel()
         for waiter in interruptedRecovery?.waiters.values.map({ $0 }) ?? [] {
-            waiter.finish(throwing: MCPBridgeRuntimeError.closed)
+            waiter.finish(throwing: MCPRuntimeError.closed)
         }
         let cleanups = Array(recoveryCleanups.values)
         recoveryCleanups.removeAll()
@@ -535,7 +535,7 @@ package actor MCPClientSessionAuthority {
         current = nil
         currentHeaders = MCPConnectionHeaders()
         for continuation in hiddenResponses.values {
-            continuation.finish(throwing: MCPBridgeRuntimeError.closed)
+            continuation.finish(throwing: MCPRuntimeError.closed)
         }
         hiddenResponses.removeAll()
         let cancellationTasks = Array(cancellationNotificationTasks.values)
@@ -562,7 +562,7 @@ package actor MCPClientSessionAuthority {
         current?.cancel()
         for task in cancellationNotificationTasks.values { task.cancel() }
         for continuation in hiddenResponses.values {
-            continuation.finish(throwing: MCPBridgeRuntimeError.closed)
+            continuation.finish(throwing: MCPRuntimeError.closed)
         }
         subscribers.finish()
         eventContinuation.finish()
@@ -630,7 +630,7 @@ private extension MCPClientSessionAuthority {
             try await joinRecovery(failedConnection: nil, deadline: deadline)
         }
         guard let current else {
-            throw MCPBridgeRuntimeError.transportUnavailable("MCP connection is unavailable")
+            throw MCPRuntimeError.transportUnavailable("MCP connection is unavailable")
         }
         return current
     }
@@ -677,7 +677,7 @@ private extension MCPClientSessionAuthority {
             try await Self.awaitConnectionCommand(sendTask)
         } catch let failure as MCPTransportFailure {
             throw failure
-        } catch let error as MCPBridgeRuntimeError {
+        } catch let error as MCPRuntimeError {
             throw error
         } catch is CancellationError {
             throw CancellationError()
@@ -751,7 +751,7 @@ private extension MCPClientSessionAuthority {
                             return .response(response)
                         }
                         try Task.checkCancellation()
-                        throw MCPBridgeRuntimeError.transportUnavailable(
+                        throw MCPRuntimeError.transportUnavailable(
                             "connection closed during initialize"
                         )
                     }
@@ -764,7 +764,7 @@ private extension MCPClientSessionAuthority {
                             return response
                         }
                     }
-                    throw MCPBridgeRuntimeError.transportUnavailable(
+                    throw MCPRuntimeError.transportUnavailable(
                         "connection closed during initialize"
                     )
                 }
@@ -804,7 +804,7 @@ private extension MCPClientSessionAuthority {
             // Another caller already replaced the connection that failed.
             return
         }
-        if isClosed { throw MCPBridgeRuntimeError.closed }
+        if isClosed { throw MCPRuntimeError.closed }
         try checkDeadline(deadline, method: "session recovery")
         let recoveryID = recovery?.id ?? startRecovery()
         let waiterID = UUID()
@@ -815,9 +815,9 @@ private extension MCPClientSessionAuthority {
             try await raceDeadline(deadline, method: "session recovery") {
                 for try await _ in pair.stream { return }
                 try Task.checkCancellation()
-                throw MCPBridgeRuntimeError.transportUnavailable("session recovery ended without a result")
+                throw MCPRuntimeError.transportUnavailable("session recovery ended without a result")
             }
-        } catch let error as MCPBridgeRuntimeError {
+        } catch let error as MCPRuntimeError {
             if case .requestTimedOut = error { throw error }
             throw MCPClientSessionFailure.sessionRecoveryFailed(error.localizedDescription)
         } catch let failure as MCPClientSessionFailure {
@@ -998,25 +998,25 @@ private extension MCPClientSessionAuthority {
         if let error = object["error"] as? [String: Any] {
             let code = (error["code"] as? NSNumber)?.intValue ?? 0
             let message = error["message"] as? String ?? "MCP server error"
-            throw MCPBridgeRuntimeError.serverError(
+            throw MCPRuntimeError.serverError(
                 code: code,
                 message: message,
                 data: error["data"].flatMap(JSONValue.init(any:))
             )
         } else if object["error"] != nil {
-            throw MCPBridgeRuntimeError.invalidResponse("initialize error is not an object")
+            throw MCPRuntimeError.invalidResponse("initialize error is not an object")
         }
         guard let result = object["result"] as? [String: Any] else {
-            throw MCPBridgeRuntimeError.invalidResponse("initialize result is not an object")
+            throw MCPRuntimeError.invalidResponse("initialize result is not an object")
         }
         guard let protocolVersion = result["protocolVersion"] as? String,
               protocolVersion.isEmpty == false else {
-            throw MCPBridgeRuntimeError.invalidResponse(
+            throw MCPRuntimeError.invalidResponse(
                 "initialize result is missing protocolVersion"
             )
         }
         guard MCPProtocolVersion.isSupported(protocolVersion) else {
-            throw MCPBridgeRuntimeError.invalidResponse(
+            throw MCPRuntimeError.invalidResponse(
                 "initialize result has unsupported protocolVersion \(protocolVersion)"
             )
         }
@@ -1032,7 +1032,7 @@ private extension MCPClientSessionAuthority {
     }
 
     func ensureOpen() throws {
-        if isClosed { throw MCPBridgeRuntimeError.closed }
+        if isClosed { throw MCPRuntimeError.closed }
         if case .unavailable(let error) = snapshot.phase {
             throw error.sessionError
         }
@@ -1040,7 +1040,7 @@ private extension MCPClientSessionAuthority {
 
     func checkDeadline(_ deadline: Deadline?, method: String) throws {
         if deadline?.hasExpired == true {
-            throw MCPBridgeRuntimeError.requestTimedOut(method: method)
+            throw MCPRuntimeError.requestTimedOut(method: method)
         }
     }
 
@@ -1057,7 +1057,7 @@ private extension MCPClientSessionAuthority {
             group.addTask {
                 await clock.sleep(deadline.remainingDuration())
                 try Task.checkCancellation()
-                throw MCPBridgeRuntimeError.requestTimedOut(method: method)
+                throw MCPRuntimeError.requestTimedOut(method: method)
             }
             let result = try await group.next()!
             group.cancelAll()
@@ -1083,9 +1083,9 @@ extension XcodeMCPError {
         case .sessionRecoveryFailed(let reason):
             MCPClientSessionFailure.sessionRecoveryFailed(reason)
         case .transportUnavailable(let reason):
-            MCPBridgeRuntimeError.transportUnavailable(reason)
+            MCPRuntimeError.transportUnavailable(reason)
         case .invalidResponse(let reason):
-            MCPBridgeRuntimeError.invalidResponse(reason)
+            MCPRuntimeError.invalidResponse(reason)
         case .closed, .invalidRequest, .requestTimedOut, .serverError:
             self
         }

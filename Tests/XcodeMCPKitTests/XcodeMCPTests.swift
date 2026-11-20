@@ -137,7 +137,7 @@ struct XcodeMCPTests {
 
         await closeGate.open()
         #expect(try await transport.nextCloseTerminal() == 1)
-        await #expect(throws: MCPBridgeRuntimeError.invalidResponse(
+        await #expect(throws: MCPRuntimeError.invalidResponse(
             "initialize result has unsupported protocolVersion 2099-01-01"
         )) {
             try await initialize.value
@@ -147,7 +147,7 @@ struct XcodeMCPTests {
 
     @Test func asyncInitializerMapsRuntimeTransportErrorsToPublicError() async throws {
         let transport = RuntimeFailingXcodeMCPTransport(
-            error: MCPBridgeRuntimeError.transportUnavailable("mcpbridge write queue is full")
+            error: MCPRuntimeError.transportUnavailable("mcpbridge write queue is full")
         )
 
         await #expect(throws: XcodeMCPError.transportUnavailable(
@@ -427,7 +427,7 @@ struct XcodeMCPTests {
             weakProbe = probe
             let capturedProbe = probe
 
-            await #expect(throws: MCPBridgeRuntimeError.invalidRequest(
+            await #expect(throws: MCPRuntimeError.invalidRequest(
                 "progress requests require object params"
             )) {
                 _ = try await session.request(
@@ -523,7 +523,7 @@ struct XcodeMCPTests {
         )
         let sendsBeforeRequest = await transport.sentMessages().count
 
-        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(method: "tools/list")) {
+        await #expect(throws: MCPRuntimeError.requestTimedOut(method: "tools/list")) {
             _ = try await session.request(
                 "tools/list",
                 deadline: Deadline(uptimeNanoseconds: 0)
@@ -576,7 +576,7 @@ struct XcodeMCPTests {
         #expect(requestedTimeout == .seconds(2))
 
         await timeoutClock.resumeSleep(at: sleepBaseline)
-        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(method: "tools/list")) {
+        await #expect(throws: MCPRuntimeError.requestTimedOut(method: "tools/list")) {
             _ = try await requestTask.value
         }
         _ = try await transport.nextCancelled(method: "tools/list")
@@ -1381,7 +1381,7 @@ struct XcodeMCPTests {
         ]
 
         for array in arrays {
-            #expect(throws: MCPBridgeRuntimeError.invalidRequest(
+            #expect(throws: MCPRuntimeError.invalidRequest(
                 "JSON-RPC message must be one object"
             )) {
                 _ = try MCPClientEnvelope(data: Data(array.utf8))
@@ -1964,9 +1964,9 @@ private func waitUntilAuthorityCloseStarts(
             throw XcodeMCPError.invalidResponse(
                 "expired close probe unexpectedly reached the transport"
             )
-        } catch MCPBridgeRuntimeError.closed {
+        } catch MCPRuntimeError.closed {
             return
-        } catch MCPBridgeRuntimeError.requestTimedOut {
+        } catch MCPRuntimeError.requestTimedOut {
             await Task.yield()
         } catch MCPClientSessionFailure.sessionRecoveryFailed {
             await Task.yield()
@@ -2023,7 +2023,7 @@ private actor LifecycleTransportFactory {
 
     func make() throws -> any XcodeMCPTransport {
         guard index < transports.count else {
-            throw MCPBridgeRuntimeError.transportUnavailable("test factory exhausted")
+            throw MCPRuntimeError.transportUnavailable("test factory exhausted")
         }
         defer { index += 1 }
         return transports[index]
@@ -2128,7 +2128,7 @@ private actor StalledRecoveryTransportFactory {
         case 3:
             return fresh
         default:
-            throw MCPBridgeRuntimeError.transportUnavailable("test factory exhausted")
+            throw MCPRuntimeError.transportUnavailable("test factory exhausted")
         }
     }
 
@@ -2159,7 +2159,7 @@ private actor MixedRecoveryTransportFactory {
 
     func make() throws -> any XcodeMCPTransport {
         guard transports.indices.contains(count) else {
-            throw MCPBridgeRuntimeError.transportUnavailable("test factory exhausted")
+            throw MCPRuntimeError.transportUnavailable("test factory exhausted")
         }
         defer { count += 1 }
         return transports[count]
@@ -2218,7 +2218,7 @@ private actor LifecycleContractTransport: XcodeMCPTransport {
     ) async throws {
         _ = headers
         _ = deadline
-        guard closed == false else { throw MCPBridgeRuntimeError.closed }
+        guard closed == false else { throw MCPRuntimeError.closed }
         let object = try lifecycleObject(data)
         let message = SentMessage(
             id: object["id"],
@@ -2327,7 +2327,7 @@ private actor LifecycleContractTransport: XcodeMCPTransport {
         let raw = try JSONSerialization.jsonObject(with: data)
         guard let value = MCPJSONValue(foundationObject: raw),
               let object = value.objectValue else {
-            throw MCPBridgeRuntimeError.invalidRequest("test message is not an object")
+            throw MCPRuntimeError.invalidRequest("test message is not an object")
         }
         return object
     }
@@ -2593,10 +2593,10 @@ private actor UnsupportedResponseFailingXcodeMCPTransport: XcodeMCPTransport {
 
     private let continuation: AsyncStream<XcodeMCPTransportEvent>.Continuation
     private let sentMessageValues = RecordedValues<SentMessage>()
-    private let error: MCPBridgeRuntimeError
+    private let error: MCPRuntimeError
     private var closed = false
 
-    init(error: MCPBridgeRuntimeError) {
+    init(error: MCPRuntimeError) {
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
         self.events = stream.stream
         self.continuation = stream.continuation
@@ -2611,7 +2611,7 @@ private actor UnsupportedResponseFailingXcodeMCPTransport: XcodeMCPTransport {
         _ = headers
         _ = deadline
         guard closed == false else {
-            throw MCPBridgeRuntimeError.closed
+            throw MCPRuntimeError.closed
         }
         let object = try parse(data)
         let sent = SentMessage(

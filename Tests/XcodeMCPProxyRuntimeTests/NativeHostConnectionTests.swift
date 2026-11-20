@@ -59,12 +59,12 @@ struct NativeHostConnectionTests {
         let upstreamIDs = host.requests("tools/call").compactMap { $0["id"] }
         #expect(Set(upstreamIDs.map { "\($0)" }).count == 2)
         guard case .object(let params)? = host.requests("tools/call").first?["params"],
-              case .object(let meta)? = params["_meta"], let upstreamToken = meta["progressToken"] else {
+              case .object(let meta)? = params["_meta"], let hostToken = meta["progressToken"] else {
             Issue.record("The progress token did not reach the host"); return
         }
-        #expect(upstreamToken != .string("token"))
+        #expect(hostToken != .string("token"))
         host.emit(.object(["jsonrpc": .string("2.0"), "method": .string("notifications/progress"),
-                           "params": .object(["progressToken": upstreamToken, "progress": .number(.int(1))])]))
+                           "params": .object(["progressToken": hostToken, "progress": .number(.int(1))])]))
         host.release("tools/call", with: .result(.object(["content": .array([])])))
         #expect(try await first.value["id"] == .number(.int(1)))
         #expect(try await second.value["id"] == .number(.int(1)))
@@ -412,7 +412,7 @@ struct NativeHostConnectionTests {
 }
 
 /// Returns its session only after `gate` is signaled.
-private final class GatedSessionFactory: UpstreamSessionFactory, Sendable {
+private final class GatedSessionFactory: MCPProcessSessionFactory, Sendable {
     let session: FakeHostSession
     let gate: TestSignal
     let entered = TestSignal()
@@ -422,7 +422,7 @@ private final class GatedSessionFactory: UpstreamSessionFactory, Sendable {
         self.gate = gate
     }
 
-    func startSession() async throws -> any UpstreamSession {
+    func startSession() async throws -> any MCPProcessSession {
         entered.signal()
         try await gate.wait(description: "process start released")
         return session

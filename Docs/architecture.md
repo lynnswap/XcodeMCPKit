@@ -53,7 +53,7 @@ alter that request's response contract.
 Each Xcode installation has at most one owned headless host process, shared by
 every MCP session.
 A host connection owns its process: it starts it on first use, sends one
-`initialize`, assigns upstream request IDs, returns progress to the requesting
+`initialize`, assigns host request IDs, returns progress to the requesting
 session, and sends `notifications/cancelled` when a request is cancelled or
 times out. A timeout fails only that request.
 
@@ -67,7 +67,7 @@ in the result's `_meta`. The broker records that report for the session and
 removes it from the client's result.
 
 When a process exits or violates the protocol, its in-flight requests fail with
-`upstream unavailable`, handles created by that process expire, and the next
+`host unavailable`, handles created by that process expire, and the next
 request starts a new process. Delivery-unknown mutations are not replayed.
 Closing an MCP session releases its handles. A headless host for a non-default
 installation stops after `NativeHostBroker.idleHostGracePeriod`
@@ -94,12 +94,12 @@ startup; write failure unwinds acquired resources.
 
 ## Streamable HTTP contract
 
-- Every request is checked by one Host and Origin policy before route resolution, session creation, debug reset, or upstream I/O. This includes `/health`, `/debug/*`, MCP routes, and unknown routes.
+- Every request is checked by one Host and Origin policy before route resolution, session creation, debug reset, or host I/O. This includes `/health`, `/debug/*`, MCP routes, and unknown routes.
 - A `Host` header must name an IP address, `localhost`, or the configured listen host, with any port, since a port forward delivers the client's port; multiple or other values return `403`. A page that rebinds its own domain to the listener therefore cannot reach it. A missing `Host` is allowed.
 - A missing `Origin` header is allowed for non-browser clients. When `Origin` is present it must be one valid HTTP(S) origin whose host and port match the actual listener policy; empty, multiple, `null`, malformed, and cross-origin values return `403`.
-- `/debug/upstreams` and `/debug/reset` return `404` unless the server enables debug endpoints (`--debug-endpoints`) and listens on loopback.
+- `/debug/hosts` and `/debug/reset` return `404` unless the server enables debug endpoints (`--debug-endpoints`) and listens on loopback.
 - `POST /mcp` requires `Content-Type: application/json`. A client whose `Accept` omits `text/event-stream` gets every reply as JSON and no progress.
-- A POST that carries a request is answered with one JSON-RPC response; a client notification or response gets `202`. When the request reports progress before its reply, or its reply takes longer than 15 seconds, the POST response becomes an event stream (`text/event-stream`) that carries the progress notifications and keepalive comments every 15 seconds, and ends with the response; otherwise the response is JSON. Clients give up on a response that does not start within a minute, and on a stream that stays silent for a few minutes. `initialize` is never streamed. When a host's response is not valid JSON-RPC for its request, the client receives error `-32603` (`invalid upstream response`) for that request.
+- A POST that carries a request is answered with one JSON-RPC response; a client notification or response gets `202`. When the request reports progress before its reply, or its reply takes longer than 15 seconds, the POST response becomes an event stream (`text/event-stream`) that carries the progress notifications and keepalive comments every 15 seconds, and ends with the response; otherwise the response is JSON. Clients give up on a response that does not start within a minute, and on a stream that stays silent for a few minutes. `initialize` is never streamed. When a host's response is not valid JSON-RPC for its request, the client receives error `-32603` (`invalid host response`) for that request.
 - HTTP owns MCP sessions. It generates `MCP-Session-Id` on `initialize`, ignoring caller-provided ids, and ends the runtime's side of a session when the session is deleted, expires, or the server stops. An `initialize` that arrives while the server is stopping returns `503`.
 - After initialize, `POST`, `GET`, and `DELETE` require `MCP-Session-Id`. An explicit `MCP-Protocol-Version` must be valid, supported, and match the negotiated version.
 - When `MCP-Protocol-Version` is omitted, the server uses the session's negotiated version. If no negotiated version exists, it evaluates the protocol-defined fallback `2025-03-26` and returns `400` when that version is unsupported.
@@ -109,7 +109,7 @@ startup; write failure unwinds acquired resources.
 - A GET stream carries a keepalive comment every 15 seconds.
 - A session with no in-flight HTTP request and no open SSE stream is retained for five minutes after its last client activity so that an interrupted SSE connection can reconnect. A one-minute sweep then terminates stale sessions and their buffered notifications; outbound server notifications do not extend this lifetime.
 - HTTP connection, SSE connection, request, and response access events are debug telemetry, including expected protocol-level `4xx` responses. The response remains the client-visible error contract.
-- Empty, singleton, and mixed JSON-RPC arrays return `400`; the internal executor and response router operate on typed single messages. An array response from an upstream is a protocol violation.
+- Empty, singleton, and mixed JSON-RPC arrays return `400`; the internal executor and response router operate on typed single messages. An array response from a host is a protocol violation.
 - Host `notifications/progress` is delivered only on the POST response stream of the request that carries that progress token, never to another session, another request, or a GET stream. It is dropped when the request has finished, and while a client that falls behind has not read the earlier ones. Other host notifications fan out to the GET streams of the sessions using that host.
 - HTTP owns each session's bounded SSE notification buffer. On overflow it drops the oldest notification and emits at most one warning per 30 seconds per session. `dropped_notifications` is cumulative for that session, while the warning also reports the dropped delta and sanitized methods of the notifications actually evicted; notification payloads are never logged. Unhandled server notifications remain debug-level events.
 

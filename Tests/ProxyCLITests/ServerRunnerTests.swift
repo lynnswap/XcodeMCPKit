@@ -64,7 +64,7 @@ struct ServerRunnerTests {
         #expect(exitCode == 0)
         let configuration = try #require(fakeServer.recordedConfig())
         let runtimeConfiguration = try configuration.runtimeConfiguration()
-        let child = try NativeHostRuntime.makeDefaultUpstreamConfig(
+        let child = try NativeHostRuntime.makeDefaultProcessConfig(
             config: NativeHostRuntime.Configuration(
                 nativeHostBundleURL: runtimeConfiguration.nativeHostBundleURL,
                 developerDirectoryURL: runtimeConfiguration.developerDirectoryURL,

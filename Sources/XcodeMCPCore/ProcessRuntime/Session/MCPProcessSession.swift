@@ -1,9 +1,9 @@
 import Foundation
 import XcodeMCPWire
 
-package enum Upstream {}
+package enum MCPProcess {}
 
-extension Upstream {
+extension MCPProcess {
     package enum Event: Sendable {
         case message(Data)
         case stderr(String)
@@ -20,27 +20,27 @@ extension Upstream {
         case shuttingDown
     }
 
-    /// Why a send did not reach the upstream. Backpressure is the only case
-    /// that should count against the upstream's health; an unavailable slot is
+    /// Why a send did not reach the process. Backpressure is the only case
+    /// that should count against the process's health; an unavailable slot is
     /// already handled by the exit/quarantine machinery.
     package enum SendResult: Sendable, Equatable {
         case accepted
         case backpressure
-        case unavailable(Upstream.UnavailableReason)
+        case unavailable(MCPProcess.UnavailableReason)
     }
 }
 
-package protocol UpstreamSession: AnyObject, Sendable {
-    var events: AsyncStream<Upstream.Event> { get }
+package protocol MCPProcessSession: AnyObject, Sendable {
+    var events: AsyncStream<MCPProcess.Event> { get }
     /// Sends a synchronous best-effort stop signal to the owned process I/O.
     /// Completion remains the responsibility of ``stop()``.
     nonisolated func cancel()
-    func send(_ data: Data) async -> Upstream.SendResult
+    func send(_ data: Data) async -> MCPProcess.SendResult
     /// Closes MCP input and waits for process exit and output drain. Unresponsive
     /// processes are terminated after the configured shutdown grace.
     func stop() async
 }
 
-package protocol UpstreamSessionFactory: Sendable {
-    func startSession() async throws -> any UpstreamSession
+package protocol MCPProcessSessionFactory: Sendable {
+    func startSession() async throws -> any MCPProcessSession
 }

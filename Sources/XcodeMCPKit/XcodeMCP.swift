@@ -195,7 +195,7 @@ public actor XcodeMCP {
                         bundleURL: bundleURL,
                         developerDirectoryURL: developerDirectoryURL
                     )
-                    return try await UpstreamProcessXcodeMCPTransport.start(
+                    return try await ProcessXcodeMCPTransport.start(
                         command: invocation.command,
                         arguments: invocation.arguments,
                         environment: ProcessInfo.processInfo.environment
@@ -203,7 +203,7 @@ public actor XcodeMCP {
                 }
             case .process(let command, let arguments, let environment):
                 recipe = MCPTransportRecipe {
-                    try await UpstreamProcessXcodeMCPTransport.start(
+                    try await ProcessXcodeMCPTransport.start(
                         command: command,
                         arguments: arguments,
                         environment: environment
@@ -469,7 +469,7 @@ private extension XcodeMCP {
         if error is CancellationError {
             return error
         }
-        guard let runtimeError = error as? MCPBridgeRuntimeError else {
+        guard let runtimeError = error as? MCPRuntimeError else {
             if let failure = error as? MCPTransportFailure {
                 switch failure {
                 case .sessionExpired(let sessionID, _):

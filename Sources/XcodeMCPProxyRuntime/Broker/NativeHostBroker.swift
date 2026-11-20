@@ -6,7 +6,7 @@ import XcodeMCPProxyRuntimeContract
 import XcodeMCPWire
 
 package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
-    typealias SessionFactory = @Sendable (NativeHostRuntime.Configuration) -> any UpstreamSessionFactory
+    typealias SessionFactory = @Sendable (NativeHostRuntime.Configuration) -> any MCPProcessSessionFactory
 
     private struct State: Sendable {
         var hosts: [String: NativeBrokerHost] = [:]
@@ -29,7 +29,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     private let configuration: ProxyRuntimeConfiguration
     private let inventory: XcodeHostInventory
     private let sessionFactory: SessionFactory
-    private let guiSessionFactory: any UpstreamSessionFactory
+    private let guiSessionFactory: any MCPProcessSessionFactory
     private let clock: ClockClient
     private let logger: Logger
     static let defaultHostIdentifier = "host-default"
@@ -76,7 +76,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
 
     init(configuration: ProxyRuntimeConfiguration, inventory: XcodeHostInventory,
          clock: ClockClient = .liveValue, logger: Logger = ProxyLogging.make("broker"),
-         guiSessionFactory: (any UpstreamSessionFactory)? = nil,
+         guiSessionFactory: (any MCPProcessSessionFactory)? = nil,
          sessionFactory: @escaping SessionFactory) throws {
         self.configuration = configuration
         self.inventory = inventory
@@ -260,7 +260,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         guard let admission else { return AnsweredCall(reply: cancelled) }
         let key = UUID()
         let admittedMessage = message
-        let timeoutReply = NativeBrokerReply.error(id: requestID, code: -32000, message: "upstream timeout").clientReply
+        let timeoutReply = NativeBrokerReply.error(id: requestID, code: -32000, message: "host timeout").clientReply
         let operation = NativeHostBrokerOperation(cancelledReply: cancelled, requestIDKey: requestID?.key,
             deadline: deadline, clock: clock, timeoutReply: timeoutReply) { [self] in
             let reply = await process(admittedMessage, in: session, admission: admission)
@@ -353,7 +353,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 return try Self.externalReply(error.reply, requestID: id)
             } catch {
                 logger.notice("A host's error response is invalid", metadata: ["error": "\(error)"])
-                return .invalidUpstreamResponse(id: id)
+                return .invalidHostResponse(id: id)
             }
         } catch is CancellationError {
             return .error(id: id, code: -32800, message: "request cancelled")
@@ -396,11 +396,11 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
         catch let error as NativeHostConnectionError {
             switch error {
             case .expired: throw Self.expiredReference()
-            case .unavailable: throw Self.replyError(error, code: -32001, message: "upstream unavailable")
-            case .overloaded: throw Self.replyError(error, code: -32002, message: "upstream overloaded")
-            case .timedOut: throw Self.replyError(error, code: -32000, message: "upstream timeout")
+            case .unavailable: throw Self.replyError(error, code: -32001, message: "host unavailable")
+            case .overloaded: throw Self.replyError(error, code: -32002, message: "host overloaded")
+            case .timedOut: throw Self.replyError(error, code: -32000, message: "host timeout")
             case .invalidResponse:
-                throw NativeHostBrokerReplyError(description: error.description, reply: .invalidUpstreamResponse())
+                throw NativeHostBrokerReplyError(description: error.description, reply: .invalidHostResponse())
             case .rejected(let response):
                 throw NativeHostBrokerReplyError(description: error.description, reply: .response(response))
             }
@@ -1048,7 +1048,7 @@ private extension NativeHostBroker {
                 }
             } catch is NativeBrokerTurns<NativeBrokerWorkspace.Scope>.Full {
                 // The host's queue would refuse these requests too.
-                throw Self.replyError(.overloaded, code: -32002, message: "upstream overloaded")
+                throw Self.replyError(.overloaded, code: -32002, message: "host overloaded")
             }
         } else {
             sent = try Self.takingSelection(from: await send(forwarded, to: host, session: session, generation: generation))

@@ -178,7 +178,7 @@ struct XcodeMCPProxyServerTests {
         let server = XcodeMCPProxyServer(configuration: .init(
             bindAddress: .localhost(port: 0), nativeHostBundleURL: missingBundle, discovery: .disabled
         ))
-        await #expect(throws: MCPBridgeRuntimeError.self) { _ = try await server.start() }
+        await #expect(throws: MCPRuntimeError.self) { _ = try await server.start() }
         let snapshot = await server.snapshot()
         #expect(snapshot.phase == .stopped)
         #expect(snapshot.endpoint == nil)

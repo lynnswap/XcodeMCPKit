@@ -71,10 +71,10 @@ enum LogLevelParser {
     }
 }
 
-extension Upstream.Diagnostics {
+extension MCPProcess.Diagnostics {
     /// Forwards a host process session's diagnostics to the server log.
     static var serverLog: Self {
-        let logger = Logger(label: "XcodeMCPRuntime.upstream")
+        let logger = Logger(label: "XcodeMCPRuntime.host")
         return Self { severity, message, metadata in
             let metadata = metadata.mapValues { Logger.MetadataValue.string($0) }
             switch severity {

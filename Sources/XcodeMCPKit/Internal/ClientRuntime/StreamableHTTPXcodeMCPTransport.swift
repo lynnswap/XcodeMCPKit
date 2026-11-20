@@ -56,7 +56,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
         discoveryResolver: StreamableHTTPDiscoveryResolver = .liveValue
     ) async throws -> StreamableHTTPXcodeMCPTransport {
         guard let endpoint = discoveryResolver.endpoint(from: discoveryFile) else {
-            throw MCPBridgeRuntimeError.transportUnavailable(
+            throw MCPRuntimeError.transportUnavailable(
                 "Streamable HTTP discovery file is missing, stale, or invalid: \(discoveryFile.path)"
             )
         }
@@ -165,7 +165,7 @@ package final class StreamableHTTPXcodeMCPTransport: XcodeMCPTransport {
         streamContinuation.finish()
     }
 
-    private static func runtimeError(from error: StreamableHTTPMCPClientError) -> MCPBridgeRuntimeError {
+    private static func runtimeError(from error: StreamableHTTPMCPClientError) -> MCPRuntimeError {
         switch error {
         case .httpStatus(let statusCode, let body, _):
             return .httpStatus(code: statusCode, body: body)

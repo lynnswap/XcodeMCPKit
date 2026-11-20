@@ -32,15 +32,15 @@ package protocol XcodeMCPTransport: Sendable {
     func close(headers: MCPConnectionHeaders) async
 }
 
-package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
+package final class ProcessXcodeMCPTransport: XcodeMCPTransport {
     package nonisolated let events: AsyncStream<XcodeMCPTransportEvent>
 
-    private let session: any UpstreamSession
+    private let session: any MCPProcessSession
     private let bridgeTask: Task<Void, Never>
 
-    package static func start(config: UpstreamProcess.Config) async throws -> UpstreamProcessXcodeMCPTransport {
-        let session = try await UpstreamProcess(configuration: config).startSession()
-        return UpstreamProcessXcodeMCPTransport(session: session)
+    package static func start(config: MCPProcessLauncher.Config) async throws -> ProcessXcodeMCPTransport {
+        let session = try await MCPProcessLauncher(configuration: config).startSession()
+        return ProcessXcodeMCPTransport(session: session)
     }
 
     package static func start(
@@ -48,9 +48,9 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
         arguments: [String],
         environment: [String: String],
         maxQueuedWriteBytes: Int = 4 * 1024 * 1024
-    ) async throws -> UpstreamProcessXcodeMCPTransport {
+    ) async throws -> ProcessXcodeMCPTransport {
         try await start(
-            config: UpstreamProcess.Config(
+            config: MCPProcessLauncher.Config(
                 command: command,
                 args: arguments,
                 environment: environment,
@@ -59,7 +59,7 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
         )
     }
 
-    private init(session: any UpstreamSession) {
+    private init(session: any MCPProcessSession) {
         self.session = session
         let sessionEvents = session.events
         let stream = AsyncStream<XcodeMCPTransportEvent>.makeStream()
@@ -100,7 +100,7 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
         headers: MCPConnectionHeaders,
         deadline: Deadline?
     ) async throws {
-        // A local stdio bridge has no HTTP session headers. The typed boundary
+        // A local stdio process has no HTTP session headers. The typed boundary
         // remains explicit so adding another transport input cannot silently
         // fall back to a legacy send path.
         _ = headers
@@ -109,9 +109,9 @@ package final class UpstreamProcessXcodeMCPTransport: XcodeMCPTransport {
         case .accepted:
             return
         case .backpressure:
-            throw MCPBridgeRuntimeError.transportUnavailable("MCP process write queue is full")
+            throw MCPRuntimeError.transportUnavailable("MCP process write queue is full")
         case .unavailable(let reason):
-            throw MCPBridgeRuntimeError.transportUnavailable("MCP process is unavailable: \(reason)")
+            throw MCPRuntimeError.transportUnavailable("MCP process is unavailable: \(reason)")
         }
     }
 

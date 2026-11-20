@@ -52,7 +52,7 @@ reject_matches \
 
 reject_matches \
     "XcodeMCPProxyHTTP references a host process type" \
-    '(^|[^[:alnum:]_])Upstream[A-Za-z0-9_]*([^[:alnum:]_]|$)' \
+    '(^|[^[:alnum:]_])(Upstream|MCPProcess)[A-Za-z0-9_]*([^[:alnum:]_]|$)' \
     Sources/XcodeMCPProxyHTTP
 
 reject_matches \
