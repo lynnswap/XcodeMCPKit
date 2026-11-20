@@ -368,7 +368,11 @@ package actor MCPClientSessionAuthority {
     /// its deadline passes, or when the session closes.
     private struct Recovery {
         let id: UUID
-        let task: Task<Void, Never>
+        let attempt: Task<Void, Never>
+        /// Fails the recovery at its deadline, whichever step the attempt has reached.
+        let deadline: Task<Void, Never>
+        /// The replacement, once the attempt has installed it as the current connection.
+        var connectionID: MCPConnectionID?
         var waiters: [UUID: AsyncThrowingStream<Void, Error>.Continuation] = [:]
     }
 
@@ -399,6 +403,9 @@ package actor MCPClientSessionAuthority {
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     private var hiddenResponses: [String: AsyncThrowingStream<MCPClientEnvelope, Error>.Continuation] = [:]
     private var recovery: Recovery?
+    /// Work that failed recoveries left behind, such as a transport that is still being
+    /// created. `close()` waits for it.
+    private var recoveryCleanups: [UUID: Task<Void, Never>] = [:]
     private var cancellationNotificationTasks: [UUID: Task<Void, Never>] = [:]
 
     private init(
@@ -516,10 +523,13 @@ package actor MCPClientSessionAuthority {
         isClosed = true
         let interruptedRecovery = recovery
         recovery = nil
-        interruptedRecovery?.task.cancel()
+        interruptedRecovery?.attempt.cancel()
+        interruptedRecovery?.deadline.cancel()
         for waiter in interruptedRecovery?.waiters.values.map({ $0 }) ?? [] {
             waiter.finish(throwing: MCPBridgeRuntimeError.closed)
         }
+        let cleanups = Array(recoveryCleanups.values)
+        recoveryCleanups.removeAll()
         let connection = current
         let headers = currentHeaders
         current = nil
@@ -534,7 +544,8 @@ package actor MCPClientSessionAuthority {
         if let connection {
             await Self.closeConnection(connection, headers: headers)
         }
-        await interruptedRecovery?.task.value
+        await interruptedRecovery?.attempt.value
+        for cleanup in cleanups { await cleanup.value }
         for task in cancellationTasks { await task.value }
         publish(.closed)
         subscribers.finish()
@@ -546,7 +557,8 @@ package actor MCPClientSessionAuthority {
     }
 
     isolated deinit {
-        recovery?.task.cancel()
+        recovery?.attempt.cancel()
+        recovery?.deadline.cancel()
         current?.cancel()
         for task in cancellationNotificationTasks.values { task.cancel() }
         for continuation in hiddenResponses.values {
@@ -832,14 +844,12 @@ private extension MCPClientSessionAuthority {
         currentHeaders = MCPConnectionHeaders()
         publish(.recovering)
         let recipe = recipe
-        let deadline = Deadline.fromNow(recoveryTimeout, clock: clock)
         // The task holds the session only while it installs and initializes the replacement,
         // so a session that is released while a transport is being created can go away.
-        let task = Task { [weak self] in
+        let attempt = Task { [weak self] in
             if let retired {
                 await Self.closeConnection(retired, headers: retiredHeaders)
             }
-            let result: Result<Void, Error>
             do {
                 try Task.checkCancellation()
                 let transport = try await recipe.makeTransport()
@@ -847,58 +857,80 @@ private extension MCPClientSessionAuthority {
                     await transport.close(headers: MCPConnectionHeaders())
                     return
                 }
-                try await self.adoptRecoveredTransport(transport, recoveryID: id, deadline: deadline)
-                result = .success(())
+                try await self.initializeRecoveredTransport(transport, recoveryID: id)
+                await self.completeRecovery(id: id)
             } catch {
-                result = .failure(error)
+                await self?.failRecovery(id: id, reason: error.localizedDescription)
             }
-            await self?.finishRecovery(id: id, result: result)
         }
-        recovery = Recovery(id: id, task: task)
+        let timeout = recoveryTimeout
+        let clock = clock
+        let deadline = Task { [weak self] in
+            await clock.sleep(timeout)
+            guard Task.isCancelled == false else { return }
+            await self?.failRecovery(id: id, reason: "session recovery timed out")
+        }
+        recovery = Recovery(id: id, attempt: attempt, deadline: deadline)
         return id
     }
 
-    private func adoptRecoveredTransport(
+    private func initializeRecoveredTransport(
         _ transport: any XcodeMCPTransport,
-        recoveryID: UUID,
-        deadline: Deadline?
+        recoveryID: UUID
     ) async throws {
         guard recovery?.id == recoveryID, isClosed == false, Task.isCancelled == false else {
+            // The recovery ended while the transport was being created.
             await transport.close(headers: MCPConnectionHeaders())
             throw CancellationError()
         }
         let connection = installConnection(transport, phase: .recovering)
-        do {
-            try await performManagedHandshake(initialize, on: connection, deadline: deadline)
-        } catch {
-            // `close()` takes the connection itself; otherwise the failed replacement is ours.
-            if current?.id == connection.id {
-                let headers = currentHeaders
-                current = nil
-                currentHeaders = MCPConnectionHeaders()
-                await Self.closeConnection(connection, headers: headers)
-            }
-            throw error
+        recovery?.connectionID = connection.id
+        try await performManagedHandshake(initialize, on: connection, deadline: nil)
+    }
+
+    private func completeRecovery(id: UUID) {
+        guard let completed = recovery, completed.id == id,
+              let connectionID = completed.connectionID, current?.id == connectionID
+        else { return }
+        recovery = nil
+        completed.deadline.cancel()
+        publish(.ready)
+        for waiter in completed.waiters.values {
+            waiter.yield(())
+            waiter.finish()
         }
     }
 
-    private func finishRecovery(id: UUID, result: Result<Void, Error>) {
-        guard let finished = recovery, finished.id == id else { return }
+    /// Ends a recovery as failed. The attempt may still be running: its remaining work and
+    /// its replacement are released in a cleanup that `close()` waits for, so a later
+    /// reconnect can start at once.
+    private func failRecovery(id: UUID, reason: String) {
+        guard let failed = recovery, failed.id == id else { return }
         recovery = nil
-        switch result {
-        case .success:
-            publish(.ready)
-            for waiter in finished.waiters.values {
-                waiter.yield(())
-                waiter.finish()
-            }
-        case .failure(let error):
-            let reason = error.localizedDescription
-            publish(.unavailable(.sessionRecoveryFailed(reason)))
-            for waiter in finished.waiters.values {
-                waiter.finish(throwing: MCPClientSessionFailure.sessionRecoveryFailed(reason))
-            }
+        failed.deadline.cancel()
+        failed.attempt.cancel()
+        var replacement: (connection: Connection, headers: MCPConnectionHeaders)?
+        if let connection = current, connection.id == failed.connectionID {
+            replacement = (connection, currentHeaders)
+            current = nil
+            currentHeaders = MCPConnectionHeaders()
         }
+        publish(.unavailable(.sessionRecoveryFailed(reason)))
+        for waiter in failed.waiters.values {
+            waiter.finish(throwing: MCPClientSessionFailure.sessionRecoveryFailed(reason))
+        }
+        let attempt = failed.attempt
+        recoveryCleanups[id] = Task { [weak self, replacement] in
+            if let replacement {
+                await Self.closeConnection(replacement.connection, headers: replacement.headers)
+            }
+            await attempt.value
+            await self?.recoveryCleanupEnded(id: id)
+        }
+    }
+
+    private func recoveryCleanupEnded(id: UUID) {
+        recoveryCleanups.removeValue(forKey: id)
     }
 
     func handle(

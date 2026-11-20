@@ -1554,7 +1554,7 @@ struct XcodeMCPTests {
             Issue.record("expected a recovery past its deadline to become unavailable")
             return
         }
-        #expect(await stalled.closeCount() == 1)
+        _ = try await stalled.nextCloseCount()
 
         try await authority.reconnect(deadline: nil)
         #expect(await authority.connectionState().phase == .ready)
@@ -1563,15 +1563,20 @@ struct XcodeMCPTests {
         #expect(await stalled.closeCount() == 1)
     }
 
-    @Test func recoveryPastItsDeadlineDoesNotInitializeALateTransport() async throws {
+    @Test func recoveryDeadlineDuringTransportCreationAllowsAFreshReconnect() async throws {
         let recoveryClock = ManualSessionTimeoutClock()
         let clock = await recoveryClock.client()
         let expired = LifecycleContractTransport(
-            name: "expired-before-late-transport",
+            name: "expired-before-stalled-create",
             expirations: ["tools/list": 1]
         )
-        let replacement = LifecycleContractTransport(name: "late-transport")
-        let factory = BlockingRecoveryTransportFactory(first: expired, blocked: replacement)
+        let late = LifecycleContractTransport(name: "created-after-deadline")
+        let fresh = LifecycleContractTransport(name: "fresh-after-stalled-create")
+        let factory = StalledRecoveryTransportFactory(
+            first: expired,
+            stalledCandidate: late,
+            fresh: fresh
+        )
         let authority = try await MCPClientSessionAuthority.startManaged(
             recipe: MCPTransportRecipe { try await factory.make() },
             initialize: lifecycleInitializeContext,
@@ -1580,27 +1585,36 @@ struct XcodeMCPTests {
         )
         let sleepBaseline = await recoveryClock.requestedSleepCount()
         let request = Task {
-            try await authority.send(try lifecycleOperation(
-                method: "tools/list",
-                deadline: Deadline.fromNow(.seconds(2), clock: clock)
-            ))
+            try await authority.send(try lifecycleOperation(method: "tools/list", deadline: nil))
         }
 
-        try await factory.waitUntilBlockedMakeStarts()
-        _ = try await recoveryClock.nextRequestedSleep(at: sleepBaseline)
+        try await factory.waitUntilStalledMakeStarts()
+        #expect(try await recoveryClock.nextRequestedSleep(at: sleepBaseline) == .seconds(2))
         await recoveryClock.advanceUptime(by: .seconds(3))
         await recoveryClock.resumeSleep(at: sleepBaseline)
-        await #expect(throws: MCPBridgeRuntimeError.requestTimedOut(
-            method: "session recovery"
-        )) {
+        do {
             try await request.value
+            Issue.record("expected the recovery deadline to fail its waiter")
+        } catch MCPClientSessionFailure.sessionRecoveryFailed {
         }
 
-        await factory.releaseBlockedMake()
-        _ = try await replacement.nextCloseCount()
-        #expect(await replacement.sentMessages().isEmpty)
-        await authority.close()
-        #expect(await replacement.closeCount() == 1)
+        try await authority.reconnect(deadline: nil)
+        #expect(await authority.connectionState().phase == .ready)
+        #expect(await factory.makeCount() == 3)
+
+        let closeCompletions = RecordedValues<Void>()
+        let close = Task {
+            await authority.close()
+            await closeCompletions.append(())
+        }
+        _ = try await fresh.nextCloseCount()
+        #expect(await closeCompletions.count() == 0)
+
+        await factory.releaseStalledMake()
+        await close.value
+        #expect(await closeCompletions.count() == 1)
+        #expect(await late.sentMessages().isEmpty)
+        #expect(await late.closeCount() == 1)
     }
 
     @Test func closeWaitsForARecoveryTransportThatIsStillBeingCreated() async throws {
@@ -2081,6 +2095,53 @@ private actor BlockingRecoveryTransportFactory {
     func releaseBlockedMake() {
         blockedContinuation?.resume()
         blockedContinuation = nil
+    }
+}
+
+private actor StalledRecoveryTransportFactory {
+    private let first: any XcodeMCPTransport
+    private let stalledCandidate: any XcodeMCPTransport
+    private let fresh: any XcodeMCPTransport
+    private let stalledMakeStarts = RecordedValues<Void>()
+    private let stalledMakeGate = NonCooperativeSendGate()
+    private var count = 0
+
+    init(
+        first: any XcodeMCPTransport,
+        stalledCandidate: any XcodeMCPTransport,
+        fresh: any XcodeMCPTransport
+    ) {
+        self.first = first
+        self.stalledCandidate = stalledCandidate
+        self.fresh = fresh
+    }
+
+    func make() async throws -> any XcodeMCPTransport {
+        count += 1
+        switch count {
+        case 1:
+            return first
+        case 2:
+            await stalledMakeStarts.append(())
+            await stalledMakeGate.wait()
+            return stalledCandidate
+        case 3:
+            return fresh
+        default:
+            throw MCPBridgeRuntimeError.transportUnavailable("test factory exhausted")
+        }
+    }
+
+    func waitUntilStalledMakeStarts() async throws {
+        _ = try await stalledMakeStarts.nextValue()
+    }
+
+    func releaseStalledMake() async {
+        await stalledMakeGate.release()
+    }
+
+    func makeCount() -> Int {
+        count
     }
 }
 
