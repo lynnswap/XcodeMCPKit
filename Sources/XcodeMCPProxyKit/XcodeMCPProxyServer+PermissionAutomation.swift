@@ -9,8 +9,8 @@ protocol ProxyServerPermissionDialogAutoApprover: Sendable {
 }
 
 extension XcodePermissionDialogAutomation.AutoApprover: ProxyServerPermissionDialogAutoApprover {
-    static func liveForAllAgents(assistantName: String?) -> Self {
-        let names = Set(["XcodeMCPKit", "XcodeMCPProxyKit"] + [assistantName].compactMap { $0 })
+    static func liveForAllAgents() -> Self {
+        let names: Set<String> = ["XcodeMCPKit", "XcodeMCPProxyKit"]
         return Self(
             configuration: .init(
                 permissionDialogProcessIDs: {

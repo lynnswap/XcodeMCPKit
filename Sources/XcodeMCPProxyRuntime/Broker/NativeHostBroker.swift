@@ -44,6 +44,13 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
     /// Bounds a cleanup close while client requests have no timeout, so a host that never answers
     /// does not keep the model from being bound again.
     static let cleanupFallbackTimeout: Duration = .seconds(60)
+    /// The `initialize` params every host receives. Client sessions share a host, so the handshake
+    /// advertises no capability that would let the host send requests to a client.
+    static let initializeParams: JSONValue = .object([
+        "protocolVersion": .string(MCP.ProtocolVersion.current),
+        "capabilities": .object([:]),
+        "clientInfo": .object(["name": .string("XcodeMCPKit"), "version": .string("dev")]),
+    ])
     /// Bounds a host's initialize handshake even when client requests have no timeout.
     private static let handshakeTimeoutLimit: Duration = .seconds(60)
     /// Bounds an internal catalog load even when client requests have no timeout.
@@ -96,8 +103,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
                 maxBodyBytes: configuration.maxMessageBytes)
             let connection = NativeHostConnection(
                 factory: sessionFactory(processConfiguration),
-                handshake: .object(InitializeHandshakeJSON.resolved(
-                    initializeParamsOverride: configuration.initializeParamsOverride)),
+                handshake: Self.initializeParams,
                 handshakeTimeout: handshakeTimeout, catalogTimeout: catalogTimeout,
                 prewarmsCatalog: configuration.prewarmToolsList, clock: clock,
                 logger: ProxyLogging.make("native-host"),
@@ -123,8 +129,7 @@ package final class NativeHostBroker: ProxyRuntimeServing, Sendable {
             guard !storage.stopped, storage.resetsInProgress == 0 else { throw CancellationError() }
             if let connection = storage.guiConnection { return connection }
             let connection = NativeHostConnection(factory: guiSessionFactory,
-                handshake: .object(InitializeHandshakeJSON.resolved(
-                    initializeParamsOverride: configuration.initializeParamsOverride)),
+                handshake: Self.initializeParams,
                 handshakeTimeout: handshakeTimeout, catalogTimeout: catalogTimeout,
                 prewarmsCatalog: false, clock: clock, logger: ProxyLogging.make("mcpbridge"),
                 onEvent: { [weak self] event in self?.receive(event, from: Self.guiHostIdentifier) })

@@ -162,7 +162,6 @@ let package = Package(
             dependencies: [
                 "XcodeMCPProxyRuntimeContract",
                 "XcodeMCPCore",
-                "XcodeMCPKit",
                 "XcodeMCPProxyRuntime",
                 "XcodeMCPProxyHTTP",
                 "XcodeMCPPermissionAutomation",

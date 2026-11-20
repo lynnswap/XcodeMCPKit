@@ -1077,36 +1077,13 @@ func compileOnlyProxyConfigurationSurface() {
         developerDirectoryURL: URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer"),
         maxBodyBytes: 1_048_576,
         requestTimeout: .seconds(120),
-        initializeHandshake: .init(
-            protocolVersion: "2025-06-18",
-            clientInfo: .init(name: "EmbeddingClient", version: "1.0"),
-            capabilities: [
-                "roots": [
-                    "listChanged": true,
-                ],
-                "experimental": [
-                    "priority": 1,
-                    "score": 0.5,
-                    "metadata": .null,
-                ],
-            ]
-        ),
         discovery: .file(URL(fileURLWithPath: "/tmp/xcode-mcp-discovery.json")),
         approvalPolicy: .automatic,
         prewarmToolsList: false
     )
-    let typedHandshake = config.initializeHandshake
-    let typedCapabilities: [String: MCPJSONValue]? = typedHandshake?.capabilities
-    let metadataIsNull = typedCapabilities?["experimental"]?.objectValue?["metadata"]?.isNull
     let server = XcodeMCPProxyServer(configuration: config)
 
-    _ = (
-        config,
-        typedHandshake,
-        typedCapabilities,
-        metadataIsNull,
-        server
-    )
+    _ = (config, server)
 }
 
 func compileOnlyProxyLaunchSurface() async throws {

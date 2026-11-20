@@ -284,7 +284,7 @@ extension XcodeMCPProxyServer {
                     runtime: runtime,
                     endpoint: boundEndpoint,
                     autoApprover: configuration.approvalPolicy == .automatic
-                        ? dependencies.makeAutoApprover(configuration) : nil
+                        ? dependencies.makeAutoApprover() : nil
                 )
             } catch {
                 let operationError = error

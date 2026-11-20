@@ -92,7 +92,6 @@ struct ServerCommandTests {
             "MCP_XCODE_AUTO_APPROVE": "1",
             "LAZY_INIT": "true",
         ])
-        #expect(config.initializeHandshake == nil)
         #expect(config.prewarmToolsList)
         #expect(config.approvalPolicy == .manual)
     }

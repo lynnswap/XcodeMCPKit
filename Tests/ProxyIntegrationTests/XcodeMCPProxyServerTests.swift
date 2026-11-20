@@ -201,7 +201,7 @@ struct XcodeMCPProxyServerTests {
             dependencies: .init(
                 discoveryClient: .testValue,
                 makeRuntime: { _ in StartupTestRuntime() },
-                makeAutoApprover: { _ in
+                makeAutoApprover: {
                     creations.withLockedValue { $0 += 1 }
                     return approver
                 }
@@ -286,7 +286,7 @@ struct XcodeMCPProxyServerTests {
                 makeRuntime: { config in
                     try makeServerTestRuntime(config: config, hosts: hosts)
                 },
-                makeAutoApprover: { _ in approver }
+                makeAutoApprover: { approver }
             )
         )
 
