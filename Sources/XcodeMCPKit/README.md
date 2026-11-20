@@ -5,9 +5,9 @@ Swift client API for calling Xcode MCP from an app or tool.
 ## Overview
 
 Use `XcodeMCPKit` when Swift code needs to discover and call Xcode MCP tools.
-The default transport discovers a running `xcode-mcp-proxy-server` endpoint.
-The proxy routes public workspace handles to owned headless models.
-Start the proxy before constructing a default client.
+The default transport discovers a running `xcode-mcp-server` endpoint.
+The server routes public workspace handles to owned headless models.
+Start the server before constructing a default client.
 
 The public API is intentionally small:
 
@@ -22,7 +22,7 @@ The public API is intentionally small:
 Use `listTools()` to discover the connected server's operations, `callTool`
 to invoke them, and `request(_:params:)` for MCP methods outside `tools/call`.
 The SDK preserves JSON schemas and values rather than providing tool-specific
-Swift wrappers. The proxy keeps its public inputs stable across native backends.
+Swift wrappers. The server keeps its public inputs stable across native backends.
 
 Use `XcodeMCPKitTesting` when tests need deterministic tool catalogs, progress
 notifications, and tool results through the same `XcodeMCP` API without
@@ -30,7 +30,7 @@ launching Xcode or the native helper.
 
 ## Quickstart
 
-Add the `XcodeMCPKit` product to your target and start `xcode-mcp-proxy-server`,
+Add the `XcodeMCPKit` product to your target and start `xcode-mcp-server`,
 then construct a client:
 
 ```swift
@@ -86,7 +86,7 @@ let config = XcodeMCPConfiguration(
 ```
 
 The default transport, `.server()`, reads the standard discovery location,
-including `XCODE_MCP_PROXY_DISCOVERY_FILE` and `XCODE_MCP_PROXY_CACHE_ROOT`
+including `XCODE_MCP_SERVER_DISCOVERY_FILE` and `XCODE_MCP_SERVER_CACHE_ROOT`
 overrides.
 
 ### Workspace routing
@@ -106,7 +106,7 @@ if let workspace = opened.structuredContent?["workspaceIdentifier"]?.stringValue
 }
 ```
 
-`XcodeListWorkspaces` lists already loaded headless models. The proxy retains
+`XcodeListWorkspaces` lists already loaded headless models. The server retains
 each workspace's host and translates native workspace selectors internally. Obtain fresh identifiers after a new MCP session or host
 restart. Absolute workspace paths also load saved models in the default headless
 host when explicit Open is unnecessary. See [workspace usage](../../Docs/usage.md)
@@ -132,7 +132,7 @@ await standalone.close()
 This transport exposes the host's native tools and owns its process lifecycle.
 Conditions that the transport handles itself, such as process output that is not
 MCP JSON, are reported to unified logging under the `XcodeMCPKit` subsystem.
-Its native catalog and identifiers are outside the proxy's stable tool/handle
+Its native catalog and identifiers are outside the server's stable tool/handle
 contract. Discover its capabilities with `listTools()` and keep native identifiers
 within that standalone session.
 
@@ -188,7 +188,7 @@ let symbols = try await xcode.request(
   the default timeout; nonpositive durations are rejected.
 
 The standard `XcodeListWindows`, `GetTopCrashIssues`, and `GetCrashIssueLogs`
-tools require the HTTP proxy, which routes them through Apple's GUI bridge.
+tools require the HTTP server, which routes them through Apple's GUI bridge.
 Direct native-host transports omit these GUI-only tools from their catalogs.
 
 Each operation can override the default with `XcodeMCPTimeout`:
@@ -240,7 +240,7 @@ transport, then publishes the terminal state. Deinitialization is only a
 synchronous cancellation backstop.
 
 `XcodeMCPError` conforms to `LocalizedError`. Use `errorDescription` and
-`recoverySuggestion` for consumer-facing diagnostics; missing or stale proxy
+`recoverySuggestion` for consumer-facing diagnostics; missing or stale server
 discovery is reported as `transportUnavailable`, not as an invalid request.
 
 ## Testing

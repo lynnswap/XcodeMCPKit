@@ -1,0 +1,164 @@
+import Foundation
+import XcodeMCPCore
+import XcodeMCPServerRuntime
+
+package struct XcodeMCPProductMetadata: Equatable, Sendable {
+    package let name: String
+    package let version: String
+
+    package init(name: String = "XcodeMCPServerKit", version: String) {
+        self.name = name
+        self.version = version
+    }
+}
+
+extension XcodeMCPServer {
+    package enum LaunchAction: Sendable {
+        case display(String)
+        case dryRun(String)
+        case start(configuration: XcodeMCPServerConfiguration, forceRestart: Bool)
+    }
+
+    package static var productMetadata: XcodeMCPProductMetadata {
+        XcodeMCPProductMetadata(version: ServerBuildGeneratedInfo.version)
+    }
+
+    package static var serverUsage: String {
+        ServerCommand.helpMessage()
+    }
+
+    package static func resolveLaunchAction(
+        arguments: [String],
+        environment: [String: String]
+    ) throws -> LaunchAction {
+        let command: ServerCommand
+        switch try CLICommandParser.parse(ServerCommand.self, arguments: arguments) {
+        case .cleanExit(let message):
+            return .display(message)
+        case .command(let parsedCommand):
+            command = parsedCommand
+        }
+
+        let configuration = try command.resolveConfiguration(environment: environment)
+        _ = try configuration.runtimeConfiguration()
+        if command.dryRun || isTruthy(environment["DRY_RUN"]) {
+            return .dryRun(command.renderResolvedCommand(configuration: configuration))
+        }
+        return .start(
+            configuration: configuration,
+            forceRestart: command.forceRestart
+        )
+    }
+
+    package static func bootstrapLogging(environment: [String: String]) {
+        ServerLogging.bootstrap(environment: environment)
+    }
+}
+
+private extension ServerCommand {
+    func resolveConfiguration(environment: [String: String]) throws -> XcodeMCPServerConfiguration {
+        let listenAddress = try resolvedListenAddress(environment: environment)
+        return XcodeMCPServerConfiguration(
+            bindAddress: .init(host: listenAddress.host, port: listenAddress.port),
+            nativeHostBundleURL: environment["XCODE_MCP_NATIVE_HOST_BUNDLE"].map { URL(fileURLWithPath: $0) },
+            developerDirectoryURL: environment["DEVELOPER_DIR"].flatMap { value in
+                value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : URL(fileURLWithPath: value)
+            },
+            sharesCompilationCache: shareCompilationCache,
+            maxBodyBytes: maxBodyBytes ?? 1_048_576,
+            requestTimeout: requestTimeout.map { $0.duration }
+                ?? XcodeMCPServerConfiguration().requestTimeout,
+            discovery: .file(Discovery.defaultFileURL(environment: environment)),
+            approvalPolicy: autoApprove ? .automatic : .manual,
+            enablesDebugEndpoints: debugEndpoints
+        )
+    }
+
+    func resolvedListenAddress(environment: [String: String]) throws -> CLIListenAddress {
+        if let listen {
+            return listen
+        }
+        if host != nil || port != nil {
+            return CLIListenAddress(host: host ?? "localhost", port: port ?? 8765)
+        }
+        if let value = nonEmpty(environment["LISTEN"]) {
+            guard let address = CLIListenAddress(argument: value) else {
+                throw CLICommandParser.validationError(
+                    for: ServerCommand.self,
+                    message: "LISTEN must be a host:port value with a port in 0...65535"
+                )
+            }
+            return address
+        }
+
+        let environmentHost = nonEmpty(environment["HOST"]) ?? "localhost"
+        let environmentPort: Int
+        if let value = nonEmpty(environment["PORT"]) {
+            guard let port = Int(value), (0...65_535).contains(port) else {
+                throw CLICommandParser.validationError(
+                    for: ServerCommand.self,
+                    message: "PORT must be an integer in 0...65535"
+                )
+            }
+            environmentPort = port
+        } else {
+            environmentPort = 8765
+        }
+        return CLIListenAddress(host: environmentHost, port: environmentPort)
+    }
+
+    func renderResolvedCommand(configuration: XcodeMCPServerConfiguration) -> String {
+        var arguments = [
+            "xcode-mcp-server",
+            "--listen",
+            "\(configuration.bindAddress.host):\(configuration.bindAddress.port)",
+        ]
+        if let maxBodyBytes {
+            arguments += ["--max-body-bytes", String(maxBodyBytes)]
+        }
+        if let requestTimeout {
+            arguments += ["--request-timeout", requestTimeout.description]
+        }
+        if configuration.sharesCompilationCache {
+            arguments.append("--share-compilation-cache")
+        }
+        if configuration.approvalPolicy == .automatic {
+            arguments.append("--auto-approve")
+        }
+        if configuration.enablesDebugEndpoints {
+            arguments.append("--debug-endpoints")
+        }
+        if forceRestart {
+            arguments.append("--force-restart")
+        }
+        return arguments.map(shellQuoted).joined(separator: " ")
+    }
+}
+
+private func nonEmpty(_ value: String?) -> String? {
+    guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+        value.isEmpty == false
+    else {
+        return nil
+    }
+    return value
+}
+
+private func isTruthy(_ value: String?) -> Bool {
+    guard let value = nonEmpty(value) else {
+        return false
+    }
+    return ["1", "true", "yes", "on"].contains(value.lowercased())
+}
+
+private func shellQuoted(_ value: String) -> String {
+    let safeCharacters = CharacterSet.alphanumerics.union(
+        CharacterSet(charactersIn: "-._/:,@")
+    )
+    if value.isEmpty == false,
+        value.unicodeScalars.allSatisfy(safeCharacters.contains)
+    {
+        return value
+    }
+    return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}

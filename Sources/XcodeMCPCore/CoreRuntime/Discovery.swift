@@ -24,8 +24,8 @@ package struct DiscoveryRecord: Codable, Sendable {
 }
 
 package enum Discovery {
-    package static let cacheRootEnvironmentVariable = "XCODE_MCP_PROXY_CACHE_ROOT"
-    package static let discoveryFileEnvironmentVariable = "XCODE_MCP_PROXY_DISCOVERY_FILE"
+    package static let cacheRootEnvironmentVariable = "XCODE_MCP_SERVER_CACHE_ROOT"
+    package static let discoveryFileEnvironmentVariable = "XCODE_MCP_SERVER_DISCOVERY_FILE"
 
     package static var defaultFileURL: URL {
         defaultFileURL(environment: ProcessInfo.processInfo.environment)
@@ -53,7 +53,7 @@ package enum Discovery {
         }
 
         return cacheRootURL
-            .appendingPathComponent("XcodeMCPProxy", isDirectory: true)
+            .appendingPathComponent("XcodeMCPServer", isDirectory: true)
             .appendingPathComponent("endpoint.json")
     }
 

@@ -9,7 +9,7 @@ coverage. Native results do not identify network versus cache provenance.
 
 The report UI and Markdown are in Japanese. JSON field names are stable English
 identifiers. Keep GUI Xcode running with an open workspace and App Store Connect
-account access. `--auto-approve` on the proxy can approve its bridge connection.
+account access. `--auto-approve` on the server can approve its bridge connection.
 Standard acquisition does not operate Organizer.
 
 ## Start the report page

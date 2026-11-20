@@ -15,7 +15,7 @@ and device-session identifiers from the old context are invalid.
 
 ## An operation is unavailable
 
-The public catalog describes stable proxy operations. Availability still depends
+The public catalog describes stable server operations. Availability still depends
 on the workspace's Xcode installation and native context. Read the tool error
 for the unsupported operation or missing native contract. A public schema does
 not guarantee that every installed Xcode supports that operation.
@@ -26,7 +26,7 @@ require the client to refresh definitions after opening another workspace.
 
 ## The native helper cannot be found or started
 
-Keep `XcodeMCPNativeHost.app` beside `xcode-mcp-proxy-server`. Reinstall the complete
+Keep `XcodeMCPNativeHost.app` beside `xcode-mcp-server`. Reinstall the complete
 package if the helper is missing; copying only the command is insufficient.
 Custom layouts can use `XCODE_MCP_NATIVE_HOST_BUNDLE` or the embedding
 `nativeHostBundleURL` property.
@@ -40,7 +40,7 @@ after such a failure. See [Xcode compatibility](configuration.md#xcode-compatibi
 
 ## A tool request times out
 
-Inspect the proxy/helper error before increasing deadlines. `MCP_LOG_LEVEL=debug`
+Inspect the server/helper error before increasing deadlines. `MCP_LOG_LEVEL=debug`
 shows HTTP, initialization, catalog, cancellation, and recovery telemetry.
 Confirm the workspace path exists, save headless source/project changes, and
 inspect the owning workspace's scheme, destination, and test plan. Selections made
@@ -51,7 +51,7 @@ code, and context in stderr or the tool failure. `Native workspace cleanup faile
 reports cleanup of a removed model; resolve that failure before retrying against
 the same removed workspace.
 
-The proxy does not limit how long a request runs, so the client's own timeout
+The server does not limit how long a request runs, so the client's own timeout
 decides; the SDK defaults to 600 seconds. `RenderPreview` defaults to
 300 seconds for build/render work, with initial preparation and cleanup outside
 that budget. Give the external client enough time for the entire request.
@@ -85,12 +85,12 @@ proves discovery only; call the tool to verify search execution.
 
 ## A client cannot connect
 
-Ensure the proxy is running and check its URL, normally
+Ensure the server is running and check its URL, normally
 `http://localhost:8765/mcp`. The discovery record at
-`~/Library/Caches/XcodeMCPProxy/endpoint.json` is a URL hint, not proof that the
+`~/Library/Caches/XcodeMCPServer/endpoint.json` is a URL hint, not proof that the
 server is reachable.
 For `Address already in use` / `errno: 48`, stop the known listener or use
-`xcode-mcp-proxy-server --force-restart` to replace a proxy on the selected port.
+`xcode-mcp-server --force-restart` to replace a server on the selected port.
 
 Direct HTTP clients must send `Content-Type: application/json` for POST, and list
 `text/event-stream` in `Accept` to receive progress and slow replies as event
@@ -109,5 +109,5 @@ client that retained an incompatible negotiated version.
 ## Native code diagnostics differ from the navigator
 
 `XcodeRefreshCodeIssuesInFile` runs in its owning native workspace. It returns
-native diagnostics, progress, and errors. The proxy does not substitute navigator
+native diagnostics, progress, and errors. The server does not substitute navigator
 issues or retry a failed diagnostic operation through another backend.

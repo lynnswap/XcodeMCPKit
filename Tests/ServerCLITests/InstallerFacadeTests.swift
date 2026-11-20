@@ -1,0 +1,157 @@
+import Foundation
+import Testing
+@testable import XcodeMCPServerKit
+
+@Suite
+struct InstallerFacadeTests {
+    @Test func installerRunnerPrintsVersion() {
+        let result = runInstaller(arguments: ["xcode-mcp-install", "--version"])
+
+        #expect(result.exitCode == 0)
+        #expect(result.stdout == [XcodeMCPServer.productMetadata.version])
+        #expect(result.stderr.isEmpty)
+    }
+
+    @Test func installerRunnerDoesNotReinterpretAnOptionValueAsVersion() {
+        let result = runInstaller(
+            arguments: ["xcode-mcp-install", "--bindir", "--version"]
+        )
+
+        #expect(result.exitCode == 64)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr.first?.contains("Missing value for '--bindir <path>'") == true)
+    }
+
+    @Test func installerRunnerPrintsGeneratedHelp() throws {
+        let result = runInstaller(arguments: ["xcode-mcp-install", "--help"])
+
+        #expect(result.exitCode == 0)
+        #expect(result.stderr.isEmpty)
+        let line = try #require(result.stdout.first)
+        #expect(line.contains("USAGE: xcode-mcp-install"))
+    }
+
+    @Test func installerLaunchPlanParsesOptionsAndPrefersBindir() throws {
+        let action = try XcodeMCPInstaller.resolveLaunchAction(
+            arguments: [
+                "xcode-mcp-install",
+                "--prefix", "/tmp/prefix",
+                "--bindir", "/tmp/bin",
+                "--dry-run",
+            ],
+            environment: [:]
+        )
+        guard case .install(let options) = action else {
+            Issue.record("expected install action")
+            return
+        }
+
+        #expect(options.prefix == "/tmp/prefix")
+        #expect(options.binaryDirectory == "/tmp/bin")
+        #expect(options.dryRun == true)
+        #expect(
+            XcodeMCPInstaller.resolveBinDirectory(
+                prefix: options.prefix,
+                binaryDirectory: options.binaryDirectory
+            ).path == "/tmp/bin"
+        )
+    }
+
+    @Test func installerFacadeExpandsHomeRelativePaths() throws {
+        let home = NSHomeDirectory()
+        let resolved = XcodeMCPInstaller.resolveBinDirectory(
+            prefix: "~/custom",
+            binaryDirectory: nil
+        )
+
+        #expect(resolved.path == "\(home)/custom/bin")
+    }
+
+    @Test func installerFacadeFindsRepositoryRootFromBuildProducts() throws {
+        let executableURL = URL(fileURLWithPath: "/tmp/repo/.build/debug/xcode-mcp-install")
+        let root = XcodeMCPInstaller.repositoryRoot(from: executableURL)
+
+        #expect(root?.path == "/tmp/repo")
+    }
+
+    @Test func installerFacadeReportsMissingBinary() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let executableURL = tempDir.appendingPathComponent("xcode-mcp-install")
+
+        let bundle = tempDir.appendingPathComponent(XcodeMCPInstaller.nativeHostBundleName)
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+
+        #expect(throws: XcodeMCPInstaller.Error.self) {
+            try XcodeMCPInstaller(
+                configuration: .init(prefix: nil, binaryDirectory: tempDir.path, dryRun: false)
+            ).install(
+                executableURL: executableURL,
+                fileManager: .default,
+                buildProducts: { _, _, _ in },
+                verifyNativeHostBundle: { _ in },
+                stdout: { _ in }
+            )
+        }
+    }
+
+    @Test func installerRunnerRejectsMissingOptionValues() {
+        let result = runInstaller(
+            arguments: [
+                "xcode-mcp-install",
+                "--bindir",
+            ]
+        )
+
+        #expect(result.exitCode == 64)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr.first?.contains("Missing value for '--bindir <path>'") == true)
+    }
+
+    @Test func installerRunnerRejectsUnknownOptions() {
+        let result = runInstaller(
+            arguments: [
+                "xcode-mcp-install",
+                "--unknown",
+            ]
+        )
+
+        #expect(result.exitCode == 64)
+        #expect(result.stdout.isEmpty)
+        #expect(result.stderr.first?.contains("Unknown option '--unknown'") == true)
+    }
+
+    @Test func installerPlanUsesBinaryListAndBindirPriority() throws {
+        let executableURL = URL(fileURLWithPath: "/tmp/repo/.build/release/xcode-mcp-install")
+        let installer = XcodeMCPInstaller(
+            configuration: .init(prefix: "/tmp/prefix", binaryDirectory: "/tmp/bin", dryRun: true)
+        )
+        let plan = installer.plan(executableURL: executableURL)
+
+        #expect(plan.binDirectory.path == "/tmp/bin")
+        #expect(plan.dryRun)
+        #expect(plan.nativeHostBundle.sourceURL.path == "/tmp/repo/.build/release/XcodeMCPNativeHost.app")
+        #expect(plan.nativeHostBundle.destinationURL.path == "/tmp/bin/XcodeMCPNativeHost.app")
+        #expect(plan.binaries.map(\.name) == XcodeMCPInstaller.binaryNames)
+        #expect(
+            plan.binaries.map(\.destinationURL.lastPathComponent) == ["xcode-mcp-server"])
+    }
+}
+
+private func runInstaller(
+    arguments: [String],
+    environment: [String: String] = [:]
+) -> (exitCode: Int32, stdout: [String], stderr: [String]) {
+    let output = CapturedLines()
+    let errors = CapturedLines()
+    let exitCode = XcodeMCPInstaller.run(
+        arguments: arguments,
+        environment: environment,
+        stdout: { output.append($0) },
+        stderr: { errors.append($0) }
+    )
+    return (exitCode, output.snapshot(), errors.snapshot())
+}

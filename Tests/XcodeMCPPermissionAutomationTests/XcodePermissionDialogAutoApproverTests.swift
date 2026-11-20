@@ -64,7 +64,7 @@ struct XcodePermissionDialogAutoApproverTests {
             dependencies: .init(
                 configuration: .init(
                     permissionDialogProcessIDs: { [processID] },
-                    agentPathCandidates: { ["/tmp/xcode-mcp-proxy-server"] },
+                    agentPathCandidates: { ["/tmp/xcode-mcp-server"] },
                     assistantNameCandidates: { ["XcodeMCPKit"] },
                     agentProcessIDCandidates: { [6119] },
                     agentScope: .allAgents
@@ -207,7 +207,7 @@ struct XcodePermissionDialogAutoApproverTests {
             dependencies: .init(
                 configuration: .init(
                     permissionDialogProcessIDs: { [processID] },
-                    agentPathCandidates: { ["/tmp/xcode-mcp-proxy-server"] },
+                    agentPathCandidates: { ["/tmp/xcode-mcp-server"] },
                     assistantNameCandidates: { ["XcodeMCPKit"] },
                     agentProcessIDCandidates: { [6119] },
                     agentScope: .allAgents
@@ -230,7 +230,7 @@ struct XcodePermissionDialogAutoApproverTests {
     ] = [
         (["エージェント XcodeMCPKit が Xcode のツール使用を要求しています。"], makeButton(title: "許可"), Set(["XcodeMCPKit"]), Set<String>()),
         (["The agent XcodeMCPKit wants to use Xcode's tools."], XcodePermissionDialogAutomation.ButtonSnapshot(role: "AXButton", identifier: "action-button-1"), Set(["XcodeMCPKit"]), Set<String>()),
-        (["The agent at /tmp/xcode-mcp-proxy-server wants to use Xcode's tools."], makeButton(title: "Allow"), Set<String>(), Set(["/tmp/xcode-mcp-proxy-server"])),
+        (["The agent at /tmp/xcode-mcp-server wants to use Xcode's tools."], makeButton(title: "Allow"), Set<String>(), Set(["/tmp/xcode-mcp-server"])),
         (["The agent Custom MCP, PID 6119 wants to use Xcode's tools."], makeButton(title: "Allow"), Set(["Custom MCP"]), Set<String>()),
     ]
 
@@ -444,7 +444,7 @@ struct XcodePermissionDialogAutoApproverTests {
             processBundleIdentifier: "com.apple.dt.Xcode",
             title: "許可",
             textValues: [
-                "エージェント XcodeMCPKit at /tmp/xcode-mcp-proxy-server、プロセス ID 7001 が Xcode のツール使用を要求しています。"
+                "エージェント XcodeMCPKit at /tmp/xcode-mcp-server、プロセス ID 7001 が Xcode のツール使用を要求しています。"
             ],
             defaultButton: makeButton(title: "許可")
         )
@@ -452,7 +452,7 @@ struct XcodePermissionDialogAutoApproverTests {
         let decision = XcodePermissionDialogAutomation.Matcher.decision(
             for: snapshot,
             processID: 4317,
-            agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
+            agentPathCandidates: ["/tmp/xcode-mcp-server"],
             assistantNameCandidates: ["XcodeMCPKit"],
             serverProcessIDCandidates: [6119]
         )
@@ -525,9 +525,9 @@ struct XcodePermissionDialogAutoApproverTests {
             title: #"Allow "XcodeMCPKit" to access Xcode?"#,
             textValues: [
                 "The agent wants to use Xcode's tools to perform actions like building, testing, or modifying code.",
-                "Path: /Users/kn/Dev/XcodeMCPKit/.build/arm64-apple-macosx/debug/xcode-mcp-proxy-server",
+                "Path: /Users/kn/Dev/XcodeMCPKit/.build/arm64-apple-macosx/debug/xcode-mcp-server",
                 "PID: 23474",
-                "Signed by: xcode-mcp-proxy-server-55554944e4908a045cea3fc2aa2f6e03b9059810",
+                "Signed by: xcode-mcp-server-55554944e4908a045cea3fc2aa2f6e03b9059810",
             ],
             defaultButton: makeButton(title: "Allow")
         )
@@ -536,7 +536,7 @@ struct XcodePermissionDialogAutoApproverTests {
             for: snapshot,
             processID: 1036,
             agentPathCandidates: [
-                "/Users/kn/Dev/XcodeMCPKit/.build/arm64-apple-macosx/debug/xcode-mcp-proxy-server"
+                "/Users/kn/Dev/XcodeMCPKit/.build/arm64-apple-macosx/debug/xcode-mcp-server"
             ],
             assistantNameCandidates: ["XcodeMCPKit"],
             serverProcessIDCandidates: [23474]
@@ -589,14 +589,14 @@ struct XcodePermissionDialogAutoApproverTests {
             processBundleIdentifier: "com.apple.dt.Xcode",
             title: "許可",
             textValues: [
-                "The agent XcodeMCPKit at /tmp/xcode-mcp-proxy-server wants to use Xcode's tools."
+                "The agent XcodeMCPKit at /tmp/xcode-mcp-server wants to use Xcode's tools."
             ]
         )
 
         let decision = XcodePermissionDialogAutomation.Matcher.decision(
             for: snapshot,
             processID: 4317,
-            agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
+            agentPathCandidates: ["/tmp/xcode-mcp-server"],
             assistantNameCandidates: ["XcodeMCPKit"],
             serverProcessIDCandidates: [6119]
         )
@@ -609,14 +609,14 @@ struct XcodePermissionDialogAutoApproverTests {
             processBundleIdentifier: "com.apple.dt.Xcode",
             title: "許可",
             textValues: [
-                "The agent at /tmp/xcode-mcp-proxy-server wants to use Xcode's tools."
+                "The agent at /tmp/xcode-mcp-server wants to use Xcode's tools."
             ]
         )
 
         let decision = XcodePermissionDialogAutomation.Matcher.decision(
             for: snapshot,
             processID: 4317,
-            agentPathCandidates: ["/tmp/xcode-mcp-proxy-server"],
+            agentPathCandidates: ["/tmp/xcode-mcp-server"],
             assistantNameCandidates: [],
             serverProcessIDCandidates: []
         )
@@ -743,7 +743,7 @@ struct XcodePermissionDialogAutoApproverTests {
             dependencies: .init(
                 configuration: .init(
                     permissionDialogProcessIDs: { axClient.recordedProcessIDs() },
-                    agentPathCandidates: { ["/tmp/xcode-mcp-proxy-server"] },
+                    agentPathCandidates: { ["/tmp/xcode-mcp-server"] },
                     assistantNameCandidates: { [] },
                     agentProcessIDCandidates: { [6119] }
                 ),

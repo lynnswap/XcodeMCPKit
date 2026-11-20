@@ -37,7 +37,7 @@ For example, call `GetBuildLog` with a returned identifier:
 }
 ```
 
-An identifier refers to one workspace in its owning host. The proxy translates
+An identifier refers to one workspace in its owning host. The server translates
 it to the native workspace identifier. Keep using that identifier;
 no host-selection call or catalog refresh is needed. Identifiers belong to the
 MCP session that returned them. After starting a new MCP session or restarting a
@@ -71,7 +71,7 @@ them, for example because the destination is no longer available, the operation
 fails instead of running with another session's settings. Build logs, issues,
 and preview state remain shared by every session that uses the workspace.
 
-`RenderPreview` defaults to a 300-second timeout. The proxy sets no request
+`RenderPreview` defaults to a 300-second timeout. The server sets no request
 timeout by default, and the SDK defaults to 600 seconds. Set an external client's deadline above the
 preview timeout to leave time for preparation and cleanup. In a headless workspace,
 RenderPreview builds saved changes and captures a fresh snapshot. Successful
@@ -84,12 +84,12 @@ those headless resources.
 
 `RunProject` returns a `launchSessionReference`. Pass it to `GetConsoleOutput`
 to read that launch's logs without resupplying a workspace or selecting a host.
-The proxy retains the creating host and native launch reference.
+The server retains the creating host and native launch reference.
 
 `DeviceInteractionStartSession` accepts an optional `workspaceIdentifier`. With
 one, it prepares project-bound interaction, including build/install operations;
 without one, it prepares standalone device interaction. Follow-up tools use the
-returned `interactionSessionKey` consistently, and the proxy supplies its owning
+returned `interactionSessionKey` consistently, and the server supplies its owning
 host and workspace. End the session with `DeviceInteractionEndSession` when done.
 After starting a new MCP session or restarting a host, start a new device session.
 
@@ -110,7 +110,7 @@ schemas, independently of headless `workspaceIdentifier` values.
 Pass a returned signature name as `signature_name` to `GetCrashIssueLogs`, with
 the same bundle/platform, version/channel filters, and `tabIdentifier`.
 The bridge targets a running GUI copy of the selected Xcode installation.
-To select a specific instance, set `MCP_XCODE_PID` before starting the proxy.
+To select a specific instance, set `MCP_XCODE_PID` before starting the server.
 The native response does not establish complete issue/sample coverage or
 whether a result came from the network or Apple's caches. Failure never starts
 Organizer as a fallback. `--auto-approve` can approve the bridge connection.
@@ -405,10 +405,10 @@ can reuse compatible compilation work across installations.
 
 ## Tools, failures, and cancellation
 
-`tools/list` describes the proxy's public operations. Backend tool availability
+`tools/list` describes the server's public operations. Backend tool availability
 can differ by installation; a call reports when its owning host cannot perform
 an operation. Native workspace identifiers and schema changes are internal to
-the proxy. Tools without a workspace, such as `DocumentationSearch`, use the default
+the server. Tools without a workspace, such as `DocumentationSearch`, use the default
 host. Restart after installing newer developer documentation to select its index.
 
 Tool failures retain MCP `isError` and available diagnostics or partial output.

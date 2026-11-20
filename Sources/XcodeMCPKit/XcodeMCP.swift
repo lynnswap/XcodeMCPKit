@@ -24,9 +24,9 @@ public struct XcodeMCPConfiguration: Equatable, Sendable {
         /// The running server, found through its discovery file in the standard
         /// location.
         ///
-        /// The file path honors `XCODE_MCP_PROXY_DISCOVERY_FILE` first, then
-        /// `XCODE_MCP_PROXY_CACHE_ROOT`, and otherwise uses the default user
-        /// caches location used by `xcode-mcp-proxy-server`.
+        /// The file path honors `XCODE_MCP_SERVER_DISCOVERY_FILE` first, then
+        /// `XCODE_MCP_SERVER_CACHE_ROOT`, and otherwise uses the default user
+        /// caches location used by `xcode-mcp-server`.
         ///
         /// - Parameter environment: Environment used to resolve the discovery
         ///   file location.

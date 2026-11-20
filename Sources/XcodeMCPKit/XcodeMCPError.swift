@@ -72,7 +72,7 @@ extension XcodeMCPError: LocalizedError {
         case .serverError:
             return "Inspect the server error data and correct the request before retrying."
         case .transportUnavailable:
-            return "Start Xcode or the configured proxy, then reconnect."
+            return "Start Xcode or the configured server, then reconnect."
         case .sessionRecoveryFailed:
             return "Call reconnect() after confirming the MCP endpoint is available."
         }

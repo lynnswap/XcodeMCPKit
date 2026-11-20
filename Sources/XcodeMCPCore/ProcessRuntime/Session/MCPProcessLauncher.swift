@@ -169,11 +169,11 @@ private final class LiveMCPProcessDriver: MCPProcessDriving, @unchecked Sendable
 
         let stdoutReader = OrderedPipeReader(
             fileHandle: stdoutPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.MCPProcessSession.stdout"
+            label: "XcodeMCPServer.MCPProcessSession.stdout"
         )
         let stderrReader = OrderedPipeReader(
             fileHandle: stderrPipe.fileHandleForReading,
-            label: "XcodeMCPProxy.MCPProcessSession.stderr"
+            label: "XcodeMCPServer.MCPProcessSession.stderr"
         )
 
         do {
@@ -190,7 +190,7 @@ private final class LiveMCPProcessDriver: MCPProcessDriving, @unchecked Sendable
         let stdinWriter = StdinWriter(
             fileHandle: stdinPipe.fileHandleForWriting,
             maxQueuedWriteBytes: maxQueuedWriteBytes,
-            label: "XcodeMCPProxy.MCPProcessSession.stdin",
+            label: "XcodeMCPServer.MCPProcessSession.stdin",
             onComplete: { [weak self] bytes, error in
                 self?.completeStdinWrite(bytes: bytes, error: error)
             }

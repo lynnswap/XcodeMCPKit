@@ -88,8 +88,8 @@ jobs:
       - name: Restore source modification times
         run: ./scripts/restore-source-mtimes.sh
 
-      - name: Verify proxy target boundaries
-        run: ./scripts/verify-proxy-target-boundaries.sh
+      - name: Verify server target boundaries
+        run: ./scripts/verify-server-target-boundaries.sh
 
       - name: Build package tests
         run: swift build --build-tests -Xswiftc -strict-concurrency=minimal
@@ -103,8 +103,8 @@ jobs:
       fail-fast: false
       matrix:
         shard:
-          - XcodeMCPProxyRuntimeTests
-          - ProxyIntegrationTests
+          - XcodeMCPServerRuntimeTests
+          - ServerIntegrationTests
           - remaining
     steps:
       - name: Checkout
@@ -155,7 +155,7 @@ jobs:
               ./scripts/ci-test-watchdog.sh swift test \
                 --skip-build \
                 --no-parallel \
-                --skip 'XcodeMCPProxyRuntimeTests|ProxyIntegrationTests' \
+                --skip 'XcodeMCPServerRuntimeTests|ServerIntegrationTests' \
                 -Xswiftc -strict-concurrency=minimal
               exit 0
               ;;

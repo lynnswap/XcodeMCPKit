@@ -858,8 +858,8 @@ struct XcodeMCPTests {
     @Test func serverTransportUsesTheStandardDiscoveryEnvironment() throws {
         let explicitDiscovery = XcodeMCPConfiguration.Transport.server(
             environment: [
-                "XCODE_MCP_PROXY_DISCOVERY_FILE": "/tmp/public-contract/endpoint.json",
-                "XCODE_MCP_PROXY_CACHE_ROOT": "/tmp/ignored-cache-root",
+                "XCODE_MCP_SERVER_DISCOVERY_FILE": "/tmp/public-contract/endpoint.json",
+                "XCODE_MCP_SERVER_CACHE_ROOT": "/tmp/ignored-cache-root",
             ]
         )
         #expect(
@@ -870,13 +870,13 @@ struct XcodeMCPTests {
 
         let cacheRootDiscovery = XcodeMCPConfiguration.Transport.server(
             environment: [
-                "XCODE_MCP_PROXY_CACHE_ROOT": "/tmp/public-contract-cache",
+                "XCODE_MCP_SERVER_CACHE_ROOT": "/tmp/public-contract-cache",
             ]
         )
         #expect(
             cacheRootDiscovery == .server(
                 discoveryFile: URL(fileURLWithPath: "/tmp/public-contract-cache")
-                    .appendingPathComponent("XcodeMCPProxy", isDirectory: true)
+                    .appendingPathComponent("XcodeMCPServer", isDirectory: true)
                     .appendingPathComponent("endpoint.json")
             )
         )
@@ -943,9 +943,9 @@ struct XcodeMCPTests {
                 "Inspect the server error data and correct the request before retrying."
             ),
             (
-                .transportUnavailable("proxy stopped"),
-                "The Xcode MCP transport is unavailable: proxy stopped",
-                "Start Xcode or the configured proxy, then reconnect."
+                .transportUnavailable("server stopped"),
+                "The Xcode MCP transport is unavailable: server stopped",
+                "Start Xcode or the configured server, then reconnect."
             ),
             (
                 .sessionRecoveryFailed("initialize failed"),
@@ -3149,7 +3149,7 @@ private actor FakeStreamableHTTPServer {
             let result: MCPJSONValue = [
                 "protocolVersion": "2025-06-18",
                 "serverInfo": [
-                    "name": "fake-http-proxy",
+                    "name": "fake-http-server",
                     "version": "test",
                 ],
                 "capabilities": [:],

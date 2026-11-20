@@ -25,7 +25,7 @@ package enum NativeHostInvocation {
             for directory in (environment["PATH"] ?? "").split(separator: ":") {
                 let directoryURL = URL(fileURLWithPath: String(directory), isDirectory: true)
                 candidates.append(directoryURL.appendingPathComponent(bundleName))
-                let serverURL = directoryURL.appendingPathComponent("xcode-mcp-proxy-server").resolvingSymlinksInPath()
+                let serverURL = directoryURL.appendingPathComponent("xcode-mcp-server").resolvingSymlinksInPath()
                 candidates.append(serverURL.deletingLastPathComponent().appendingPathComponent(bundleName))
                 let linkedExecutable = directoryURL.appendingPathComponent(executableName).resolvingSymlinksInPath()
                 if linkedExecutable.deletingLastPathComponent().lastPathComponent == "MacOS" {

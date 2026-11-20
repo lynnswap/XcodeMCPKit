@@ -1,8 +1,32 @@
 # Migration
 
-Restart the proxy and connected MCP clients after upgrading so clients load the
+Restart the server and connected MCP clients after upgrading so clients load the
 current public tool definitions. Installation instructions are in the
 [quick start](../../README.md#quick-start).
+
+## Renamed server commands and products
+
+The server, its library, and its commands no longer use the name `proxy`.
+Update startup scripts, launch agents, MCP client registrations that start the
+server, and package dependencies:
+
+| Previous name | Current name |
+| --- | --- |
+| `xcode-mcp-proxy-server` | `xcode-mcp-server` |
+| `xcode-mcp-proxy-install` | `xcode-mcp-install` |
+| `xcode-mcp-proxy-tool-verifier` | `xcode-mcp-tool-verifier` |
+| `XcodeMCPProxyKit` product and module | `XcodeMCPServerKit` |
+| `XcodeMCPProxyServer`, `XcodeMCPProxyServerConfiguration` | `XcodeMCPServer`, `XcodeMCPServerConfiguration` |
+| `XCODE_MCP_PROXY_DISCOVERY_FILE`, `XCODE_MCP_PROXY_CACHE_ROOT` | `XCODE_MCP_SERVER_DISCOVERY_FILE`, `XCODE_MCP_SERVER_CACHE_ROOT` |
+| Discovery directory `XcodeMCPProxy` under the cache root | `XcodeMCPServer` |
+| `XCODE_MCP_PROXY_ENDPOINT` for `scripts/benchmark-live-server.py` | `XCODE_MCP_SERVER_ENDPOINT` |
+
+The Homebrew formula is still `xcode-mcpkit`; upgrading it replaces the
+`xcode-mcp-proxy-server` command with `xcode-mcp-server`. Upgrade the server and
+SDK clients together, because both look for the discovery record in the new
+directory.
+`--force-restart` recognizes only `xcode-mcp-server`, so stop a running
+`xcode-mcp-proxy-server` yourself before starting the new command on its port.
 
 ## Workspace and host routing
 
@@ -19,10 +43,10 @@ operations as described below.
 | `XcodeMCPKitSelectHost({hostIdentifier,createsNewHost:true})` or `XcodeOpenWorkspace({path,createsNewHost:true})` | `XcodeOpenWorkspace({path,hostIdentifier})`. Each installation has one shared headless host; use a separate checkout when settings must differ. |
 | GUI tab IDs for workspace operations | Use `XcodeOpenWorkspace` / `XcodeListWorkspaces` for headless workspace IDs. `XcodeListWindows` now supplies native tab IDs for the standard crash tools only. |
 | `GetBuildLog({tabIdentifier: ...})` or other GUI workspace inputs | `GetBuildLog({workspaceIdentifier: ...})` using the identifier from List/Open. |
-| A native workspace ID retained across host selection | A new proxy identifier from List/Open. Do not reuse an old native ID. |
+| A native workspace ID retained across host selection | A new server identifier from List/Open. Do not reuse an old native ID. |
 | `DeviceInteractionStartWorkspaceSession` | `DeviceInteractionStartSession` with `workspaceIdentifier`; omit that field for standalone device interaction. |
 | `interactSessionKey` in `DeviceInteractionSynthesize` | `interactionSessionKey`, using the session returned by the public device-start operation. |
-| Native `launchSessionReference` with a separately selected host | Keep the proxy reference returned by `RunProject`; pass it to `GetConsoleOutput` to retain the creating context. |
+| Native `launchSessionReference` with a separately selected host | Keep the server reference returned by `RunProject`; pass it to `GetConsoleOutput` to retain the creating context. |
 
 For example, replace the host-selection sequence with:
 
@@ -133,7 +157,7 @@ new tool definitions.
 
 ## Native helper and server configuration
 
-Install `XcodeMCPNativeHost.app` beside the proxy commands. Reinstall the complete
+Install `XcodeMCPNativeHost.app` beside the server commands. Reinstall the complete
 package if it is missing. The default helper executes headlessly through the
 selected Xcode's frameworks without Xcode Service setup. Workspace operations
 work without an open GUI window; the standard crash tools use Apple's bridge.
@@ -145,7 +169,7 @@ Remove these older settings from startup scripts and embedding configuration:
 | Removed | Current setup |
 | --- | --- |
 | `--upstream-processes`, `upstreamProcessCount` | One owned host per installation multiplexes concurrent requests. |
-| `--xcode-mode`, `--session-id`, `--upstream-command`, `--upstream-args`, `--upstream-arg` | Use the normal proxy server. Remove explicit Service enable/status and `mcpbridge` launch steps. |
+| `--xcode-mode`, `--session-id`, `--upstream-command`, `--upstream-args`, `--upstream-arg` | Use the normal server. Remove explicit Service enable/status and `mcpbridge` launch steps. |
 | `--config`, `MCP_XCODE_CONFIG`, TOML files, `configurationFileURL`, `ToolPolicy`, disabled-tool lists | Configure endpoint/deadlines directly; the MCP client controls allowed tools. |
 | `--refresh-code-issues-mode` and its policy/environment settings | `XcodeRefreshCodeIssuesInFile` uses its owning native context. |
 | Server CLI `--native-host-bundle`, `--developer-dir` | Keep the helper beside the commands; use `DEVELOPER_DIR` to prefer an installation. Embedders can set `nativeHostBundleURL` / `developerDirectoryURL`. |
@@ -159,10 +183,10 @@ that monitor. See [configuration](../configuration.md).
 ## Swift client
 
 `XcodeMCPConfiguration` defaults to `.server()`. Start the
-proxy before constructing the client. `.defaultMCPBridge` is removed. For a
+server before constructing the client. `.defaultMCPBridge` is removed. For a
 standalone headless process, use `.nativeHost()`; generic processes
 use `.process(command:arguments:environment:)`. Standalone transports
-expose their own native catalog, outside proxy handle routing.
+expose their own native catalog, outside the server's handle routing.
 
 For consumers upgrading across v0.14.0:
 
@@ -200,7 +224,7 @@ See the [client guide](../../Sources/XcodeMCPKit/README.md) for current examples
 ## Embedded server
 
 The current server API is documented in
-[XcodeMCPProxyKit](../../Sources/XcodeMCPProxyKit/README.md). For v0.14.0 consumers:
+[XcodeMCPServerKit](../../Sources/XcodeMCPServerKit/README.md). For v0.14.0 consumers:
 
 | Previous API | Current API |
 | --- | --- |
@@ -209,10 +233,10 @@ The current server API is documented in
 | Server `Configuration.Limits` | Top-level `maxBodyBytes` and `requestTimeout: Duration?`. |
 | `configurationFilePath` | Remove file-based tool policy; current configuration is typed. |
 | Struct discovery configuration | `.disabled`, `.defaultLocation`, `.file(URL)`. |
-| Public launch-plan/parser/product-metadata types | `XcodeMCPProxyServer.run(...)` for CLI hosting. |
-| Public installer library APIs | `xcode-mcp-proxy-install` executable; `--dry-run` remains supported. |
+| Public launch-plan/parser/product-metadata types | `XcodeMCPServer.run(...)` for CLI hosting. |
+| Public installer library APIs | `xcode-mcp-install` executable; `--dry-run` remains supported. |
 | `XcodeMCPProxyStdioAdapter` and its configuration | Removed. Connect clients over Streamable HTTP; Swift clients use the [SDK](../../Sources/XcodeMCPKit/README.md). |
-| `initializeHandshake` and `XcodeMCPProxyServerConfiguration.InitializeHandshake` | Removed. Hosts always receive the client name `XcodeMCPKit` and no client capabilities. `XcodeMCPProxyKit` no longer depends on the `XcodeMCPKit` product; add that product separately to use `MCPJSONValue` or the client. |
+| `initializeHandshake` and `XcodeMCPProxyServerConfiguration.InitializeHandshake` | Removed. Hosts always receive the client name `XcodeMCPKit` and no client capabilities. `XcodeMCPServerKit` no longer depends on the `XcodeMCPKit` product; add that product separately to use `MCPJSONValue` or the client. |
 | `TimeInterval` request timeout | Positive `Duration?`; `nil` disables it. CLI `--request-timeout 0` also disables it. |
 | `Status.upstreams`, `Status.Upstream.Health`, `queuedRequestCount`, `proxyInitialized`, `catalogAvailable` | `Status.hosts`: one `Status.Host` per Xcode installation, with its `identifier` (the `hostIdentifier` from `XcodeMCPKitListHosts`), `kind`, `state` (`stopped`, `starting`, `running`), and `activeRequestCount`. Requests queue inside each host, and the catalog is available whenever the server runs. |
 

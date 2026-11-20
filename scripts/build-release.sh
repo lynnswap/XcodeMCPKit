@@ -52,7 +52,7 @@ fi
 out_dir="$dist_base/$arch"
 bin_out="$out_dir/bin"
 products=(
-  "xcode-mcp-proxy-server"
+  "xcode-mcp-server"
 )
 
 pushd "$repo_root" >/dev/null
