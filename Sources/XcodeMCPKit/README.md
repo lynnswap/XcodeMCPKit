@@ -214,8 +214,14 @@ long-lived SSE GET parsing, and best-effort session DELETE during `close()`.
 Create one `XcodeMCP` per MCP session. The async initializer connects the
 transport and completes initialization before returning. A typed HTTP session
 expiry starts one shared recovery handshake; concurrent callers join it and a
-safe operation is replayed at most once. After recovery fails, normal requests
-remain unavailable until `reconnect(timeout:)` succeeds.
+safe operation is replayed at most once.
+
+A recovery belongs to the client, not to the call that started it. Cancelling a
+waiting call, or letting its timeout pass, ends only that call: the recovery
+continues, and later calls use the new connection. A recovery ends when the new
+connection is initialized, when `requestTimeout` passes (30 seconds when it is
+`nil`), or when the client closes. After a recovery fails, requests remain
+unavailable until `reconnect(timeout:)` succeeds.
 
 Use `connectionState` for the current state or `connectionStates` for an
 independent stream. Every stream starts with the current state, keeps only the

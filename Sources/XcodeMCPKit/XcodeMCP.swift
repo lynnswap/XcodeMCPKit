@@ -398,7 +398,10 @@ public actor XcodeMCP {
 
     /// Explicitly creates and initializes a fresh transport connection.
     ///
-    /// - Parameter timeout: The limit for connecting and initializing.
+    /// The connection attempt is bounded by ``XcodeMCPConfiguration/requestTimeout``
+    /// (30 seconds when it is `nil`) and continues if this call is cancelled.
+    ///
+    /// - Parameter timeout: How long this call waits for the attempt.
     public func reconnect(timeout: XcodeMCPTimeout = .default) async throws {
         do {
             try await session.reconnect(deadline: try operationDeadline(timeout))
