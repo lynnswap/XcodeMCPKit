@@ -21,116 +21,82 @@ release also verifies the public bottle on that image without forcing selection.
 A host without a matching bottle can build from source with Xcode 27. The
 package's macOS 15.4 deployment target is separate from bottle availability.
 
-## Release an approved revision
+## Publish a tagged release
 
-After approving the version, full commit SHA, title, and release notes, run:
-
-```sh
-python3 scripts/release.py start vX.Y.Z --repo lynnswap/XcodeMCPKit \
-  --target FULL_COMMIT_SHA --notes-file /path/to/notes.md
-```
-
-The script creates or reuses the matching Draft and approved source tag before
-dispatching `release.yml` from the default branch. The version is available to
-package consumers immediately. CI tests the approved source, verifies GitHub's
-tag archive against that commit, and prepares the source
-archive, `xcode-mcpkit.rb`, stable `install.sh`, and `SHA256SUMS.txt`. The Release remains a Draft.
-The generated Formula uses the public tag archive, so tap CI can build it before
-the Release is published.
-
-Tag creation uses the caller's GitHub CLI credentials. If GitHub rejects it,
-check tag rules and the caller's Contents and Workflows write permissions, then
-repeat the same start command. The matching Draft is reused.
-
-Review the version, target, notes, Formula artifact, and trusted workflow commit
-in the Actions summary. Approve the `release-publish` deployment to allow the job
-to use the GitHub App key. It revalidates the approved content, then creates a
-short-lived token restricted to `homebrew-tap` and `Actions: write`.
-
-The job dispatches the tap's `update-formula.yml` with the source tag, commit,
-and source/Formula digests. The tap checks those inputs against the public source,
-creates or reuses a Formula PR, and starts bottle CI for its exact head. This path
-handles the first Formula and subsequent versions; it does not use Renovate.
-The tap prepares a candidate with the tested bottle artifact ID and digest.
-Approve its `release-signing` deployment to allow Developer ID signing and
-notarization. The signing job handles the bottle as data and does not build or
-execute its payload. A separate job installs the signed bottle, checks the Team
-ID and stable helper signing identifier, validates its notarization ticket, and
-runs the native/server smoke tests. The tap then uploads that exact signed bottle
-and merges the Formula PR automatically using its own `GITHUB_TOKEN`.
-
-The source workflow installs the public bottle, checks its CLI versions and
-signature, and exercises native and server MCP sessions against a disposable
-project. The Formula test covers CLI options and signatures; Xcode integration
-runs outside Homebrew's test sandbox in both tap CI and source-release CI.
-The source publisher rechecks the tested delivery before publishing the approved Draft.
-Stable publication never runs when the bottle is missing or installation fails.
-An existing running server must be restarted to use an upgraded payload.
-
-Prerelease tags such as `v1.0.0-rc.1` use an isolated verification tap to build,
-bottle, reinstall, and test the Formula. They do not update the stable tap or
-replace the latest stable release.
-
-## Configure the GitHub App and approval
-
-The existing `lynnswap-homebrew-release-dispatch` App can be reused. Its
-installation must include `homebrew-tap` with `Actions: write`. Adding this source
-repository to the installation is unnecessary for dispatching to the tap; the
-source workflow uses its own `GITHUB_TOKEN` for releases. The local start command
-uses the caller's GitHub CLI credentials to create the approved source tag.
-
-In XcodeMCPKit's `release-publish` Environment:
-
-- Require the maintainer as reviewer and restrict deployment branches to `main`.
-- Disable administrator bypass. Leave **Prevent self-review** off for the sole maintainer.
-- Set `TAP_DISPATCH_APP_CLIENT_ID` to the existing App's Client ID.
-- Register the same PEM key as `TAP_DISPATCH_APP_PRIVATE_KEY`. Environment secrets
-  are scoped to each repository; another repository's registration is not inherited.
+After the target commit reaches the default branch, tag the reviewed commit and
+push the tag:
 
 ```sh
-gh variable set TAP_DISPATCH_APP_CLIENT_ID --repo lynnswap/XcodeMCPKit \
-  --env release-publish --body APP_CLIENT_ID
-gh secret set TAP_DISPATCH_APP_PRIVATE_KEY --repo lynnswap/XcodeMCPKit \
-  --env release-publish < /path/to/existing-app.private-key.pem
+git tag vX.Y.Z FULL_COMMIT_SHA
+git push origin refs/tags/vX.Y.Z
 ```
 
-In the tap's separate `release-signing` Environment, require the maintainer as
-reviewer, restrict branches to `main`, and disable administrator bypass. Register
-`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`, and
-`NOTARY_API_PRIVATE_KEY` as Environment secrets. Set `APPLE_TEAM_ID`,
-`NOTARY_API_KEY_ID`, and `NOTARY_API_ISSUER_ID` as Environment variables. The
-installed helper uses signing identifier `com.lynnswap.XcodeMCPNativeHost`; its
-Team ID and signing identifier remain stable across bottle upgrades.
+The Release workflow tests the tagged commit, builds the arm64 macOS CLI and
+native host, and prepares the source archive and Formula. Approve the
+`release-signing` deployment after checking the tag and commit in the run.
+That job signs the distribution with Developer ID Application, submits the
+archive for Apple notarization, and staples the ticket to the native host app.
+A separate job verifies signatures and the ticket from the extracted ZIP, then
+runs an MCP smoke test. After verification passes, the workflow publishes the
+GitHub Release with generated notes, the signed ZIP, and checksums. Tags such
+as `v1.0.0-rc.1` publish as prereleases and skip stable tap dispatch.
 
-Only the source dispatch job receives the GitHub App key. The job executes the workflow's pinned
-trusted scripts and revokes its installation token when it finishes. The tap
-maintains its own CI, publication permissions, and approval settings; see its
-[maintenance guide](https://github.com/lynnswap/homebrew-tap/blob/main/CONTRIBUTING.md).
+After publication, the stable release workflow requests a Formula update in
+`lynnswap/homebrew-tap`. The tap builds, signs, notarizes, and checks its bottle
+using its own pipeline. A pending approval or failed tap job leaves the
+published GitHub Release available. The `install.sh` asset uses Homebrew and
+follows the tap's available version. To use the GitHub distribution directly,
+extract the macOS arm64 ZIP, keep `bin` and `libexec` together, and run
+`./xcode-mcpkit/bin/xcode-mcp-server`.
 
-## Retry and resume
+## Set up XcodeMCPKit release signing
 
-While tap delivery is pending, the source workflow leaves the Draft and immutable
-prepared assets. After publishing the bottle and updating its Formula on `main`,
-the tap's notification job waits for `source-notification` approval before using
-its dedicated App key to dispatch `resume-release.yml`. A successful source-release run also
-triggers the same check, covering a tap notification that arrives before source
-preparation finishes. There is no scheduled polling.
+1. In **Settings → Environments**, create `release-signing` in XcodeMCPKit.
+   Require a maintainer reviewer and allow deployment from release tags
+   matching `v*`. Restrict who can create or update those tags using a
+   repository ruleset.
+2. Export a **Developer ID Application** certificate **with its private key**
+   as a password-protected `.p12` file. Use a team App Store Connect API key
+   authorized for notarization and keep its `.p8` file.
+3. Set the following secrets on the XcodeMCPKit environment. The tap's secrets
+   are scoped to the tap repository.
 
-The resume workflow reruns delivery verification and its dependent jobs only after
-the matching bottle is public. It reuses the completed source tests, source
-archive, and tap-dispatch approval. It can also be dispatched manually from `main`.
+   ```sh
+   base64 -i /path/to/DeveloperID.p12 | tr -d '\n' |
+     gh secret set DEVELOPER_ID_P12_BASE64 --repo lynnswap/XcodeMCPKit --env release-signing
+   gh secret set DEVELOPER_ID_P12_PASSWORD --repo lynnswap/XcodeMCPKit --env release-signing
+   gh secret set NOTARY_API_PRIVATE_KEY --repo lynnswap/XcodeMCPKit --env release-signing \
+     < /path/to/AuthKey_KEY_ID.p8
+   ```
 
-Actual build, install, authentication, or publication failures need attention;
-the resumer does not repeatedly retry them. Rerun the failed jobs after fixing
-the reported cause. A failed dispatch can have an uncertain acceptance outcome:
-inspect tap Actions before retrying. Repeated notifications reuse the same PR
-and CI; changed or closed proposals require inspection.
+4. Set `APPLE_TEAM_ID` as a repository Actions variable so both signing and
+   verification can check the signing team. Set the notarization key ID and
+   issuer ID on `release-signing`.
 
-Keep the approved target and publication content unchanged during a run. Changed
-notes or tag identity stop publication. Artifacts are retained for 35 days, while
-GitHub's job-rerun window also applies; expired preparation requires a new run.
-Public source tags and any already-published tap bottles remain if a later step
-fails. Previously published binary releases and their installer assets are retained.
+   ```sh
+   gh variable set APPLE_TEAM_ID --repo lynnswap/XcodeMCPKit --body TEAM_ID
+   gh variable set NOTARY_API_KEY_ID --repo lynnswap/XcodeMCPKit --env release-signing --body KEY_ID
+   gh variable set NOTARY_API_ISSUER_ID --repo lynnswap/XcodeMCPKit --env release-signing --body ISSUER_ID
+   ```
+
+The post-publication tap dispatch uses the existing `release-publish`
+environment. Allow deployment from release tags matching `v*` and keep
+`TAP_DISPATCH_APP_CLIENT_ID` and `TAP_DISPATCH_APP_PRIVATE_KEY` there. The
+GitHub App installation needs `Actions: write` on `lynnswap/homebrew-tap`.
+The tap retains its own `release-signing` environment and bottle verification.
+
+## Retry and legacy drafts
+
+Rerun failed jobs in the tagged Release workflow after resolving the failure.
+Inspect an existing GitHub Release for the tag before rerunning publication.
+If only Homebrew dispatch failed, rerun that job or inspect the tap Actions
+run if the dispatch may have reached it.
+
+Tags created before this workflow change retain the workflows from their
+tagged commits. Existing drafts can use the legacy manual
+`resume-release.yml` workflow on `main` where applicable. To use the
+tag-triggered process, create a new version tag on a commit containing this
+workflow.
 
 ## Local verification
 

@@ -364,12 +364,11 @@ discovery file for tests. Match verification claims to the operations actually r
 
 ## Release
 
-[Homebrew distribution](../Homebrew/README.md) owns approval, publication, bottle
-verification, and recovery. Approved releases use `scripts/release.py start` to
-create the approved tag and Draft before CI; source CI pins the commit and
-content, prepares the Formula, and waits
-for publication approval before tap dispatch. Both source and Homebrew installs
-keep the signed helper beside the commands. Release orchestration tests use:
+[Release and Homebrew distribution](../Homebrew/README.md) documents the tag
+trigger, Developer ID signing environment, and validation. GitHub Release
+publication depends on verification of the notarized macOS archive. The stable
+Homebrew update starts after publication. Both distributions keep the signed
+helper beside the server binary. Release orchestration tests use:
 
 ```sh
 python3 -B -m unittest discover -s scripts/tests -v
