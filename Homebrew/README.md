@@ -88,7 +88,9 @@ The tap retains its own `release-signing` environment and bottle verification.
 ## Retry and legacy drafts
 
 Rerun failed jobs in the tagged Release workflow after resolving the failure.
-Inspect an existing GitHub Release for the tag before rerunning publication.
+Publication resumes the draft created by the same Actions run and checks the
+SHA-256 digests of uploaded assets. If publication already finished, the
+rerun checks the published assets and succeeds.
 If only Homebrew dispatch failed, rerun that job or inspect the tap Actions
 run if the dispatch may have reached it.
 
