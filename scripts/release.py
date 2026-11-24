@@ -144,6 +144,73 @@ def matching_releases(github, tag):
         page += 1
 
 
+def publish_tagged(github, tag, sha, run_id, paths):
+    prerelease = is_prerelease(tag)
+    check_sha(sha)
+    if not re.fullmatch(r"[0-9]+", run_id):
+        raise ReleaseError("Use the GitHub Actions run ID.")
+
+    marker = f"<!-- XcodeMCPKit release run {run_id} at {sha} -->"
+    files = {path.name: path for path in paths}
+    if not files or len(files) != len(paths):
+        raise ReleaseError("Release assets must have distinct names.")
+    digests = {}
+    for name, path in files.items():
+        with path.open("rb") as source:
+            digests[name] = "sha256:" + hashlib.file_digest(source, "sha256").hexdigest()
+
+    def require_tag():
+        if check_tag(github, tag, sha) is None:
+            raise ReleaseError(f"Missing release tag {tag}.")
+
+    def check_release(release):
+        if (release["tag_name"] != tag or release["prerelease"] != prerelease
+                or marker not in (release.get("body") or "").splitlines()):
+            raise ReleaseError(f"Release {tag} belongs to a different publication.")
+
+    def missing_assets(release):
+        remaining = dict(files)
+        seen = set()
+        for asset in release["assets"]:
+            name = asset["name"]
+            if name not in files or name in seen:
+                raise ReleaseError(f"Unexpected asset on release {tag}: {name}")
+            seen.add(name)
+            if release["draft"] and asset["state"] == "starter":
+                continue
+            if asset["state"] != "uploaded" or asset.get("digest") != digests[name]:
+                raise ReleaseError(f"Release asset does not match the verified file: {name}")
+            del remaining[name]
+        return list(remaining.values())
+
+    require_tag()
+    matches = matching_releases(github, tag)
+    if len(matches) > 1:
+        raise ReleaseError(f"Multiple releases use {tag}.")
+    release = matches[0] if matches else github.api(
+        "releases", "POST", dict(tag_name=tag, target_commitish=sha,
+                                 body=marker, draft=True, prerelease=prerelease,
+                                 generate_release_notes=True))
+    check_release(release)
+    pending = missing_assets(release)
+    if release["draft"]:
+        if pending:
+            github.upload(tag, pending)
+        release_path = f"releases/{release['id']}"
+        release = github.api(release_path)
+        check_release(release)
+        pending = missing_assets(release)
+        if pending:
+            raise ReleaseError(f"Release {tag} is missing verified assets.")
+        require_tag()
+        if release["draft"]:
+            release = github.api(release_path, "PATCH", dict(draft=False))
+    check_release(release)
+    if release["draft"] or missing_assets(release):
+        raise ReleaseError(f"Release {tag} is not fully published.")
+    print(f"Published: {release['html_url']}")
+
+
 def dispatch_tap(github, source_repository, tag, sha, release_dir):
     if is_prerelease(tag):
         print("Prereleases do not start stable tap updates.")
@@ -384,6 +451,12 @@ def main():
     launch.add_argument("--notes-file", required=True, type=Path)
     launch.add_argument("--title", help="Defaults to the version")
     launch.add_argument("--repo", required=True)
+    tagged = commands.add_parser("publish-tagged", help="Publish or resume a tagged release")
+    tagged.add_argument("--repo", required=True)
+    tagged.add_argument("--version", required=True)
+    tagged.add_argument("--target", required=True)
+    tagged.add_argument("--run-id", required=True)
+    tagged.add_argument("assets", nargs="+", type=Path)
     notify = commands.add_parser("dispatch-tap", help="Start the tap update after approved stable tag creation")
     notify.add_argument("--source-repository", required=True)
     notify.add_argument("--version", required=True)
@@ -436,7 +509,9 @@ def main():
                 print(json.dumps(evidence) if required else "Prereleases do not require stable tap publication.")
             return 0
         github = GitHub(arguments.repo)
-        if arguments.command == "start":
+        if arguments.command == "publish-tagged":
+            publish_tagged(github, arguments.version, arguments.target, arguments.run_id, arguments.assets)
+        elif arguments.command == "start":
             start(github, arguments.version, arguments.target,
                   arguments.title or arguments.version,
                   arguments.notes_file.read_text(encoding="utf-8"))
